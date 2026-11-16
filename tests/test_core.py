@@ -88,6 +88,7 @@ async def main():
     await db.run("UPDATE users SET verified=1 WHERE user_id<=8")      # 9,10 ما تحققوا
     await db.run("UPDATE users SET blocked_bot=1 WHERE user_id=8")    # 8 حظر البوت
     await db.run("UPDATE users SET banned=1 WHERE user_id=7")
+    await db.set("captcha_on", "1")   # مع الكابتشا العامة: غير المتحققين لا يُعتمدون
     await S.validate_referrals(db)
     st = {r["user_id"]: r["status"] for r in await db.all("SELECT user_id,status FROM referrals")}
     assert [st[i] for i in range(1, 7)] == ["valid"] * 6, st
@@ -284,6 +285,45 @@ async def main():
     assert not [s for s in bot.sent if s[0] == -11]
     assert not (await S.restore_entry(bot, db, e4, -11, 7))[0]
     print("✓ no auto re-post without admin/post rights")
+    # ───── التحقق وقنوات الفعالية حسب اختيار منظّم الفعالية ─────
+    await db.run("DELETE FROM mandatory_channels")
+    for uid_ in (301, 302):
+        await db.touch_user(user(uid_))
+    ev_v = await db.insert("INSERT INTO events(owner_id,kind,title,winners,created_at,end_at,verify) VALUES(?,?,?,?,?,?,?)",
+                           100, "votes", "WithVerify", 1, S.now(), S.now() + 10, 1)
+    ev_n = await db.insert("INSERT INTO events(owner_id,kind,title,winners,created_at,end_at,verify) VALUES(?,?,?,?,?,?,?)",
+                           100, "votes", "NoVerify", 1, S.now(), S.now() + 10, 0)
+    e_v = await db.one("SELECT * FROM events WHERE id=?", ev_v)
+    e_n = await db.one("SELECT * FROM events WHERE id=?", ev_n)
+    assert ("captcha", None) in await S.check_user(bot, db, e_v, 301)       # يتطلب تحقق
+    assert not await S.check_user(bot, db, e_n, 301)                         # بدون تحقق: يمر
+    await db.run("UPDATE users SET verified=1 WHERE user_id=301")
+    assert not await S.check_user(bot, db, e_v, 301)                         # بعد التحقق: يمر
+    print("✓ verification is per-event (owner's choice)")
+
+    # قناة الفعالية إجبارية، وقناة المالك الأصلي تُفرض على الجميع ولا تُزال بتعديل الفعالية
+    await db.run("INSERT INTO event_channels(event_id,chat_id,title,url) VALUES(?,?,?,?)", ev_n, -777, "EvChan", "https://t.me/e")
+    await db.run("INSERT INTO mandatory_channels(chat_id,title,url,added_at) VALUES(?,?,?,?)", -900, "Main", "https://t.me/main", S.now())
+    bot.members[(-777, 302)] = "member"
+    f = await S.check_user(bot, db, e_n, 302)
+    assert [c[1]["chat_id"] for c in f if c[0] == "channel"] == [-900], f   # ناقصه قناة المالك فقط
+    bot.members[(-900, 302)] = "member"
+    assert not await S.check_user(bot, db, e_n, 302)
+    bot.members[(-777, 302)] = "left"
+    assert [c[1]["chat_id"] for c in await S.check_user(bot, db, e_n, 302) if c[0] == "channel"] == [-777]
+    await db.run("DELETE FROM event_channels WHERE event_id=?", ev_n)        # المنظّم أزال قناته
+    assert not await S.check_user(bot, db, e_n, 302)
+    bot.members[(-900, 302)] = "left"                                        # لكن قناة المالك لا تُزال أبداً
+    assert [c[1]["chat_id"] for c in await S.check_user(bot, db, e_n, 302) if c[0] == "channel"] == [-900]
+    print("✓ event channel + owner's forced channel + organizer can remove his own")
+
+    # بدون كابتشا عامة: الإحالات لا تسقط بسبب عدم التحقق
+    await db.set("captcha_on", "0")
+    await db.run("INSERT OR IGNORE INTO referrals(user_id,owner_id,link_code,source,created_at,status) VALUES(?,?,?,?,?,?)",
+                 302, 100, "x", "link", S.now() - 100, "pending")
+    await S.validate_referrals(db)
+    assert await db.val("SELECT status FROM referrals WHERE user_id=302") == "valid"
+    print("✓ referrals valid without global captcha")
     print("ALL OK")
 
 
