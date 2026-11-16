@@ -49,6 +49,10 @@ class EvCh(StatesGroup):
     wait = State()
 
 
+class EvDesc(StatesGroup):
+    wait = State()
+
+
 async def lang_of(uid):
     return await ctx.db.val("SELECT lang FROM users WHERE user_id=?", uid) or "ar"
 
@@ -321,7 +325,8 @@ async def show_conditions(target, state, edit=None):
              f"💬 تعليق: {'✅' if (d.get('comment_chat') or d.get('comment_url')) else '❌'}",
              f"🤖 تفعيل بوت: {'✅' if d.get('bot_url') else '❌'}",
              f"🗳 تصويت (رابط التعليق): {'✅' if d.get('vote_url') else '❌'}",
-             f"📢 قنوات إضافية: {len(d.get('extra', []))}"]
+             f"📢 قنوات إضافية: {len(d.get('extra', []))}",
+             f"✏️ وصف مخصّص: {'✅' if d.get('custom_desc') else '❌ (تلقائي: شرط واحد)'}"]
     if d["kind"] == "roulette":
         lines.append(f"🎟 فرص بالدعوة: {'✅ حتى ' + str(d['invite']) if d.get('invite') else '❌'}")
     if d["kind"] == "chroulette":
@@ -339,6 +344,7 @@ async def show_conditions(target, state, edit=None):
     kb.row(B(text="🤖 تفعيل بوت", callback_data="c:bot"), B(text="🗳 تصويت", callback_data="c:vote"))
     if d["kind"] == "roulette":
         kb.row(B(text="🎟 فرص بالدعوة", callback_data="c:inv"))
+    kb.row(B(text="✏️ تعديل الوصف", callback_data="c:desc"))
     kb.row(B(text="🚀 نشر الفعالية", callback_data="c:done"))
     kb.row(B(text="❌ إلغاء", callback_data="c:cancel"))
     await target.answer("\n".join(lines), reply_markup=kb.as_markup())
@@ -431,6 +437,15 @@ async def cb_cond(cb: CallbackQuery, state: FSMContext, bot: Bot):
         await state.set_state(New.cond_text)
         await cb.answer()
         return await cb.message.answer("📢 أرسل القناة بأي شكل: رابط أو @يوزر أو ايدي أو منشور محوّل (حتى لو البوت غير مشرف).")
+    if act == "desc":
+        if d.get("custom_desc"):   # الضغط مرة ثانية = رجوع للوصف التلقائي
+            await state.update_data(custom_desc=None)
+            await cb.answer("رجع الوصف التلقائي.")
+            return await show_conditions(cb.message, state)
+        await state.update_data(ask="desc")
+        await state.set_state(New.cond_text)
+        await cb.answer()
+        return await cb.message.answer("✏️ أرسل النص اللي تبيه يظهر مكان الشروط بمنشور الفعالية (حتى 300 حرف).")
     if act == "done":
         await cb.answer()
         return await publish(cb, state, bot)
@@ -542,7 +557,12 @@ async def in_cond_text(m: Message, state: FSMContext, bot: Bot):
         if err:
             return await m.answer(err)
         return await set_comment_group(m, state, bot, chat, url)
-    if ask == "vote":
+    if ask == "desc":
+        txt = (m.text or "").strip()
+        if not txt or len(txt) > 300:
+            return await m.answer("أرسل نص من 1 إلى 300 حرف.")
+        await state.update_data(custom_desc=txt, ask=None)
+    elif ask == "vote":
         url = (m.text or "").strip()
         if not url.startswith("https://t.me/"):
             return await m.answer("أرسل رابط يبدأ بـ https://t.me/")
@@ -575,14 +595,14 @@ async def publish(cb, state, bot):
         return await cb.message.answer("❌ البوت ليس مشرفاً في قناة النشر. اجعله مشرفاً فيها ثم انشر مرة ثانية.")
     eid = await db.insert(
         "INSERT INTO events(owner_id,kind,title,prize,winners,channel_id,created_at,end_at,need_premium,"
-        "comment_chat,comment_text,need_bot_url,invite_bonus,promo_text,min_members,max_channels,comment_url,vote_url,draw_mode,approve_mode,vote_goal,join_goal,verify) "
-        "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        "comment_chat,comment_text,need_bot_url,invite_bonus,promo_text,min_members,max_channels,comment_url,vote_url,draw_mode,approve_mode,vote_goal,join_goal,verify,custom_desc) "
+        "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
         uid, d["kind"], d["title"], d.get("prize"), d["winners"], d.get("channel"), now(),
         now() + int(d["hours"] * 3600), int(bool(d.get("premium"))), d.get("comment_chat"),
         d.get("comment_text"), d.get("bot_url"), int(d.get("invite", 0) or 0), d.get("promo"),
         int(d.get("min_members", 0)), int(ctx.db.get("chroulette_max_channels")), d.get("comment_url"), d.get("vote_url"),
         (d.get("draw_mode") or "auto") if ctx.is_owner(uid) else "auto", int(d.get("approve", 0)), (int(d.get("goal", 0) or 0) if d["kind"] == "votes" else 0), (int(d.get("goal", 0) or 0) if d["kind"] != "votes" else 0),
-        int(bool(d.get("verify", True))))
+        int(bool(d.get("verify", True))), d.get("custom_desc"))
     if d.get("own", True) and d.get("channel"):   # قناة الفعالية إجبارية افتراضياً (المنظّم يقدر يشيلها)
         try:
             och = await bot.get_chat(d["channel"])
@@ -670,6 +690,7 @@ async def manage_view(cb, ev):
         kb.button(text="⏱ +1 ساعة", callback_data=f"evext:{ev['id']}:1")
         kb.button(text="⏱ +24 ساعة", callback_data=f"evext:{ev['id']}:24")
         kb.button(text=f"🔐 التحقق: {'✅ مطلوب' if ev['verify'] else '❌ بدون'}", callback_data=f"evver:{ev['id']}")
+        kb.button(text="✏️ تعديل الوصف", callback_data=f"evdesc:{ev['id']}")
         kb.button(text="📢 القنوات الإجبارية للفعالية", callback_data=f"evmc:{ev['id']}")
         kb.button(text="🤝 مشاركة/نقل الصلاحيات", callback_data=f"evshr:{ev['id']}")
         kb.button(text="❌ إلغاء الفعالية", callback_data=f"evcan:{ev['id']}")
@@ -691,6 +712,50 @@ async def ev_toggle_verify(cb: CallbackQuery, bot: Bot):
     ev = await ctx.db.one("SELECT * FROM events WHERE id=?", ev["id"])
     await refresh_post(bot, ctx.db, ev["id"], force=True)
     await manage_view(cb, ev)
+
+
+@router.callback_query(F.data.startswith("evdesc:"))
+async def ev_desc_start(cb: CallbackQuery, state: FSMContext):
+    ev = await owned_event(cb, int(cb.data[7:]))
+    if not ev:
+        return
+    await state.set_state(EvDesc.wait)
+    await state.update_data(desc_ev=ev["id"])
+    kb = InlineKeyboardBuilder()
+    if ev.get("custom_desc"):
+        kb.button(text="↩️ رجوع للوصف التلقائي", callback_data=f"evdescx:{ev['id']}")
+    kb.button(text="⬅️", callback_data=f"evm:{ev['id']}")
+    kb.adjust(1)
+    await cb.answer()
+    await cb.message.answer("✏️ أرسل الوصف الجديد اللي يظهر مكان الشروط بالمنشور (حتى 300 حرف).", reply_markup=kb.as_markup())
+
+
+@router.message(StateFilter(EvDesc.wait), F.text)
+async def ev_desc_save(m: Message, state: FSMContext, bot: Bot):
+    d = await state.get_data()
+    txt = (m.text or "").strip()
+    if not txt or len(txt) > 300:
+        return await m.answer("أرسل نص من 1 إلى 300 حرف.")
+    ev = await ctx.db.one("SELECT * FROM events WHERE id=?", d.get("desc_ev"))
+    if not ev or (ev["owner_id"] != m.from_user.id and not ctx.is_admin(m.from_user.id)):
+        await state.clear()
+        return await m.answer("غير مسموح")
+    await ctx.db.run("UPDATE events SET custom_desc=? WHERE id=?", txt, ev["id"])
+    await audit(ctx.db, m.from_user.id, "event_desc_edit", ev["id"])
+    await state.clear()
+    await refresh_post(bot, ctx.db, ev["id"], force=True)
+    await m.answer("✅ تم تحديث الوصف ومنشور القناة.")
+
+
+@router.callback_query(F.data.startswith("evdescx:"))
+async def ev_desc_reset(cb: CallbackQuery, state: FSMContext, bot: Bot):
+    ev = await owned_event(cb, int(cb.data[8:]))
+    if not ev:
+        return
+    await ctx.db.run("UPDATE events SET custom_desc=NULL WHERE id=?", ev["id"])
+    await state.clear()
+    await refresh_post(bot, ctx.db, ev["id"], force=True)
+    await cb.answer("رجع الوصف التلقائي.")
 
 
 async def mand_view(cb, ev):

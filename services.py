@@ -369,23 +369,30 @@ async def event_text(db, ev):
         lines.append("\n🌐 <b>إمكانية مشاركة مشرفين ومالك القناة</b>")
     elif ev["invite_bonus"]:
         lines.append(f"🎟 ادعُ أصدقاءك: كل صديق = فرصة إضافية (حتى {ev['invite_bonus']})")
-    conds = []
+    # الوصف المخصّص من المالك يحلّ محلّ الشروط تماماً
+    custom = (ev.get("custom_desc") or "").strip() if hasattr(ev, "get") else (ev["custom_desc"] or "").strip()
+    if custom:
+        lines.append("\n📌 " + esc(custom))
+        return "\n".join(lines)
+    # شرط واحد فقط (الأهم). التحقق والاشتراك الإجباري العام وصلاحية الإرسال لا تظهر؛ تُفحص بصمت داخل البوت
+    cond = None
     if ev["kind"] == "chroulette":
-        conds += ["• يجب رفع البوت مشرفاً في قناتك", "• يجب فتح صلاحية الإرسال للبوت"]
-    conds += [f"• الاشتراك بـ {esc(ch['title'] or '')}" for ch in await mandatory_list(db, ev)]
-    if ev["need_premium"]:
-        conds.append("• حساب تليجرام بريميوم")
-    if ev["comment_chat"] or ev["comment_url"]:
-        here = f'<a href="{ev["comment_url"]}">علق هنا</a>' if ev["comment_url"] else "علق هنا"
-        conds.append(f"• 💬 التعليق: {here}")
-    if ev["need_bot_url"]:
-        conds.append("• تفعيل بوت معيّن")
-    if ev["vote_url"]:
-        conds.append(f'• <a href="{ev["vote_url"]}">التصويت عبر رابط التعليق</a>')
-    if ev.get("verify", 1):
-        conds.append("• 🔐 اجتياز التحقق (كابتشا)")
-    if conds:
-        lines.append("\n📌 الشروط:\n" + "\n".join(conds))
+        cond = "يجب رفع البوت مشرفاً"
+    else:
+        for ch in await db.all("SELECT chat_id,title,username,url FROM event_channels WHERE event_id=?", ev["id"]):
+            url = ch["url"] or (f"https://t.me/{ch['username']}" if ch["username"] else None)
+            cond = f'<a href="{url}">اشترك في هذه القناة</a>' if url else f"اشترك في {esc(ch['title'] or '')}"
+            break
+        if not cond and (ev["comment_chat"] or ev["comment_url"]):
+            cond = f'<a href="{ev["comment_url"]}">علق هنا</a>' if ev["comment_url"] else "علق هنا"
+        elif not cond and ev["vote_url"]:
+            cond = f'<a href="{ev["vote_url"]}">صوّت هنا</a>'
+        elif not cond and ev["need_bot_url"]:
+            cond = f'<a href="{ev["need_bot_url"]}">يجب تفعيل هذا البوت</a>'
+        elif not cond and ev["need_premium"]:
+            cond = "حساب تليجرام بريميوم"
+    if cond:
+        lines.append("\n📌 " + cond)
     return "\n".join(lines)
 
 
