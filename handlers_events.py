@@ -222,8 +222,9 @@ async def show_conditions(target, state, edit=None):
              f"{KIND_LABEL[d['kind']]} • 👑 {d['winners']} • ⏰ {d['hours']} ساعة", "",
              "📌 <b>الشروط الإضافية</b> (الاشتراك بقنوات المالك الإجبارية يُطبَّق تلقائياً):",
              f"💎 بريميوم: {'✅' if d.get('premium') else '❌'}",
-             f"💬 تعليق: {esc(d['comment_text']) if d.get('comment_text') else '❌'}",
+             f"💬 تعليق: {esc(d['comment_text']) + ' (البوت مشرف بالكروب ✅)' if d.get('comment_text') else '❌'}",
              f"🤖 تفعيل بوت: {'✅' if d.get('bot_url') else '❌'}",
+             f"🗳 تصويت (رابط التعليق): {'✅' if d.get('vote_url') else '❌'}",
              f"📢 قنوات إضافية: {len(d.get('extra', []))}"]
     if d["kind"] == "roulette":
         lines.append(f"🎟 فرص بالدعوة: {'✅ حتى ' + str(d['invite']) if d.get('invite') else '❌'}")
@@ -233,12 +234,13 @@ async def show_conditions(target, state, edit=None):
     kb.button(text="💎 بريميوم", callback_data="c:prem")
     kb.button(text="💬 تعليق", callback_data="c:com")
     kb.button(text="🤖 تفعيل بوت", callback_data="c:bot")
+    kb.button(text="🗳 تصويت", callback_data="c:vote")
     kb.button(text="📢 قناة اشتراك", callback_data="c:chan")
     if d["kind"] == "roulette":
         kb.button(text="🎟 فرص بالدعوة", callback_data="c:inv")
     kb.button(text="🚀 نشر الفعالية", callback_data="c:done")
     kb.button(text="❌ إلغاء", callback_data="c:cancel")
-    kb.adjust(2, 2, 1, 1, 1)
+    kb.adjust(2, 2, 2, 1, 1)
     await target.answer("\n".join(lines), reply_markup=kb.as_markup())
 
 
@@ -259,25 +261,42 @@ async def cb_cond(cb: CallbackQuery, state: FSMContext, bot: Bot):
         await cb.answer("✅")
         return await show_conditions(cb.message, state)
     if act == "com":
-        if not d.get("channel"):
-            return await cb.answer("اختر قناة للنشر أولاً (شرط التعليق يحتاج قناة).", show_alert=True)
-        try:
-            linked = (await bot.get_chat(d["channel"])).linked_chat_id
-        except Exception:
-            linked = None
-        if not linked:
-            return await cb.answer("هذي القناة ما لها مجموعة نقاش مرتبطة.", show_alert=True)
-        await state.update_data(comment_chat=linked, ask="comment")
+        if d.get("comment_text"):   # الضغط مرة ثانية = إلغاء الشرط
+            await state.update_data(comment_text=None, comment_chat=None, comment_url=None)
+            await cb.answer("تم إلغاء شرط التعليق.")
+            return await show_conditions(cb.message, state)
+        await state.update_data(ask="comment_chat")
         await state.set_state(New.cond_text)
+        kb = InlineKeyboardBuilder()
+        if d.get("channel"):
+            kb.button(text="💬 نفس مجموعة نقاش القناة", callback_data="cg:same")
+        kb.button(text="↩️ رجوع", callback_data="cg:back")
+        kb.adjust(1)
         await cb.answer()
-        return await cb.message.answer("💬 اكتب الكلمة/الجملة المطلوب كتابتها بالتعليق.\n"
-                                       "⚠️ لازم البوت يكون موجود بمجموعة النقاش ومعطّل خصوصية المجموعات من BotFather.")
+        return await cb.message.answer(
+            "💬 <b>شرط التعليق</b>\n"
+            "أرسل رابط الكروب/المجموعة اللي ينكتب فيها التعليق (نفس مجموعة النقاش أو أي كروب ثاني):\n"
+            "• @يوزر الكروب أو https://t.me/اسم_الكروب\n"
+            "• رابط رسالة من الكروب (مثل https://t.me/c/123456/7) أو ايدي الكروب الرقمي\n\n"
+            "⚠️ <b>لازم تجعل البوت مشرفاً في الكروب</b>، وإلا ما يقدر يشوف التعليقات ولا يحتسبها للمشاركين.",
+            reply_markup=kb.as_markup())
     if act == "bot":
         await state.update_data(ask="bot")
         await state.set_state(New.cond_text)
         await cb.answer()
         return await cb.message.answer("🤖 أرسل رابط البوت المطلوب تفعيله (مثل https://t.me/SomeBot).\n"
                                        "ملاحظة: التفعيل يعتمد على ضغط المشارك زر «فعلتها» (لا يمكن التحقق منه تلقائياً).")
+    if act == "vote":
+        if d.get("vote_url"):   # الضغط مرة ثانية = إلغاء الشرط
+            await state.update_data(vote_url=None)
+            await cb.answer("تم إلغاء شرط التصويت.")
+            return await show_conditions(cb.message, state)
+        await state.update_data(ask="vote")
+        await state.set_state(New.cond_text)
+        await cb.answer()
+        return await cb.message.answer("🗳 أرسل <b>رابط التعليق/المنشور</b> اللي يصوّت عليه المشارك "
+                                       "(مثل https://t.me/channel/123).\n"
+                                       "ملاحظة: التصويت ما يمكن التحقق منه تلقائياً، يعتمد على ضغط المشارك زر «صوّتت».")
     if act == "chan":
         await state.update_data(ask="chan")
         await state.set_state(New.cond_text)
@@ -288,12 +307,98 @@ async def cb_cond(cb: CallbackQuery, state: FSMContext, bot: Bot):
         return await publish(cb, state, bot)
 
 
+async def resolve_group(m, bot):
+    """يستخرج الكروب من @يوزر / رابط / رابط رسالة / ايدي / منشور محوّل، ويتأكد أن البوت مشرف فيه.
+    يرجع (chat, None) أو (None, رسالة_خطأ)"""
+    chat, ref = None, None
+    fo = getattr(m, "forward_origin", None)
+    if fo is not None and getattr(fo, "chat", None) is not None:
+        chat = fo.chat
+    else:
+        txt = (m.text or "").strip()
+        if txt.startswith(("https://t.me/", "http://t.me/", "t.me/")):
+            path = txt.split("t.me/", 1)[1].split("?")[0].strip("/")
+            parts = path.split("/")
+            if parts[0] == "c" and len(parts) >= 2 and parts[1].isdigit():
+                ref = int("-100" + parts[1])
+            elif parts[0].startswith("+") or parts[0] == "joinchat":
+                return None, ("❌ روابط الدعوة الخاصة ما أقدر أقرأها. أرسل ايدي الكروب الرقمي "
+                              "أو رابط رسالة منه (https://t.me/c/…) أو يوزره.")
+            elif parts[0]:
+                ref = "@" + parts[0]
+        elif txt.startswith("@") or txt.lstrip("-").isdigit():
+            ref = int(txt) if txt.lstrip("-").isdigit() else txt
+        if ref is None:
+            return None, "أرسل @يوزر الكروب أو رابطه أو رابط رسالة منه."
+        try:
+            chat = await bot.get_chat(ref)
+        except Exception:
+            return None, "❌ لم أجد الكروب. تأكد من الرابط وأن البوت مضاف فيه."
+    if chat.type not in ("group", "supergroup"):
+        return None, "❌ هذا مو كروب/مجموعة. أرسل رابط كروب (التعليقات تنكتب بالمجموعات)."
+    try:
+        me = await bot.get_chat_member(chat.id, bot.id)
+        is_admin = me.status == "administrator"
+    except Exception:
+        is_admin = False
+    if not is_admin:
+        return None, ("❌ البوت <b>ليس مشرفاً</b> في هذا الكروب.\n"
+                      "اجعل البوت مشرفاً في الكروب أولاً (لازم حتى يحتسب تعليقات المشاركين) ثم أعد إرسال الرابط.")
+    return chat, None
+
+
+async def set_comment_group(target, state, bot, chat):
+    url = await channel_url(bot, chat)
+    await state.update_data(comment_chat=chat.id, comment_url=url, ask="comment")
+    await state.set_state(New.cond_text)
+    await target.answer(f"✅ تم اعتماد الكروب «{esc(chat.title or '')}» (البوت مشرف فيه).\n\n"
+                        "✍️ الآن اكتب الكلمة/الجملة المطلوب كتابتها بالتعليق.")
+
+
+@router.callback_query(StateFilter(New.cond_text), F.data == "cg:back")
+async def cg_back(cb: CallbackQuery, state: FSMContext):
+    await cb.answer()
+    await show_conditions(cb.message, state)
+
+
+@router.callback_query(StateFilter(New.cond_text), F.data == "cg:same")
+async def cg_same(cb: CallbackQuery, state: FSMContext, bot: Bot):
+    d = await state.get_data()
+    try:
+        linked = (await bot.get_chat(d["channel"])).linked_chat_id
+        chat = await bot.get_chat(linked) if linked else None
+    except Exception:
+        chat = None
+    if not chat:
+        return await cb.answer("هذي القناة ما لها مجموعة نقاش مرتبطة. أرسل رابط كروب بدلها.", show_alert=True)
+    try:
+        me = await bot.get_chat_member(chat.id, bot.id)
+        ok = me.status == "administrator"
+    except Exception:
+        ok = False
+    if not ok:
+        return await cb.answer("❌ البوت ليس مشرفاً في مجموعة النقاش. اجعله مشرفاً فيها ثم اضغط مرة ثانية.",
+                               show_alert=True)
+    await cb.answer()
+    await set_comment_group(cb.message, state, bot, chat)
+
+
 @router.message(StateFilter(New.cond_text), F.text | F.forward_origin)
 async def in_cond_text(m: Message, state: FSMContext, bot: Bot):
     d = await state.get_data()
     ask = d.get("ask")
+    if ask == "comment_chat":
+        chat, err = await resolve_group(m, bot)
+        if err:
+            return await m.answer(err)
+        return await set_comment_group(m, state, bot, chat)
     if ask == "comment":
-        await state.update_data(comment_text=m.text.strip()[:60])
+        await state.update_data(comment_text=(m.text or "").strip()[:60])
+    elif ask == "vote":
+        url = (m.text or "").strip()
+        if not url.startswith("https://t.me/"):
+            return await m.answer("أرسل رابط يبدأ بـ https://t.me/")
+        await state.update_data(vote_url=url)
     elif ask == "bot":
         url = (m.text or "").strip()
         if not url.startswith("https://t.me/"):
@@ -314,14 +419,23 @@ async def publish(cb, state, bot):
     db = ctx.db
     d = await state.get_data()
     uid = cb.from_user.id
+    if d.get("comment_chat"):   # تأكد أن البوت ما زال مشرفاً بكروب التعليق
+        try:
+            me = await bot.get_chat_member(d["comment_chat"], bot.id)
+            ok = me.status == "administrator"
+        except Exception:
+            ok = False
+        if not ok:
+            return await cb.message.answer("❌ البوت لم يعد مشرفاً في كروب التعليق. اجعله مشرفاً فيه ثم انشر مرة ثانية "
+                                           "(أو ألغِ شرط التعليق).")
     eid = await db.insert(
         "INSERT INTO events(owner_id,kind,title,prize,winners,channel_id,created_at,end_at,need_premium,"
-        "comment_chat,comment_text,need_bot_url,invite_bonus,promo_text,min_members,max_channels) "
-        "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        "comment_chat,comment_text,need_bot_url,invite_bonus,promo_text,min_members,max_channels,comment_url,vote_url) "
+        "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
         uid, d["kind"], d["title"], d.get("prize"), d["winners"], d.get("channel"), now(),
         now() + int(d["hours"] * 3600), int(bool(d.get("premium"))), d.get("comment_chat"),
         d.get("comment_text"), d.get("bot_url"), int(d.get("invite", 0) or 0), d.get("promo"),
-        int(d.get("min_members", 0)), int(ctx.db.get("chroulette_max_channels")))
+        int(d.get("min_members", 0)), int(ctx.db.get("chroulette_max_channels")), d.get("comment_url"), d.get("vote_url"))
     for ch in d.get("extra", []):
         await db.run("INSERT OR IGNORE INTO event_channels(event_id,chat_id,title,username,url) VALUES(?,?,?,?,?)",
                      eid, ch["chat_id"], ch["title"], ch["username"], ch["url"])
@@ -506,9 +620,9 @@ async def cadd(cb: CallbackQuery, state: FSMContext, bot: Bot):
     fails = await check_user(bot, db, ev, uid)
     if fails:
         return await fails_screen(cb, ev, fails, cb.data)
-    try:   # مشرفو/مالكو قناة الروليت نفسها ممنوعون من المشاركة
+    try:   # مشرفو/مالكو قناة الروليت نفسها ممنوعون (ما عدا مالك/مشرفي البوت)
         m = await bot.get_chat_member(ev["channel_id"], uid)
-        if m.status in ("administrator", "creator"):
+        if m.status in ("administrator", "creator") and not ctx.is_admin(uid):
             return await cb.answer("🚫 مشرفو قناة الروليت لا يشاركون فيه.", show_alert=True)
     except Exception:
         pass

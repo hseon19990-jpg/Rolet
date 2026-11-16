@@ -230,12 +230,22 @@ async def fails_screen(cb, ev, fails, retry_cb):
                 kb.button(text=f"📢 {data.get('title') or ''}", url=data["url"])
         elif code == "premium":
             lines.append(t(lang, "f_premium"))
+            if ctx.is_admin(cb.from_user.id):
+                kb.button(text="👑 اعتماد يدوي (بريميوم)", callback_data=f"aprv:{ev['id']}:premium")
         elif code == "comment":
             lines.append(t(lang, "f_comment", text=esc(data)))
+            if ev["comment_url"]:
+                kb.button(text="💬 اذهب للكروب واكتب التعليق", url=ev["comment_url"])
+            if ctx.is_admin(cb.from_user.id):
+                kb.button(text="👑 اعتماد يدوي (تعليق)", callback_data=f"aprv:{ev['id']}:comment")
         elif code == "botconfirm":
             lines.append(t(lang, "f_bot"))
             kb.button(text="🤖", url=data)
             kb.button(text=t(lang, "btn_confirm"), callback_data=f"conf:{ev['id']}")
+        elif code == "voteconfirm":
+            lines.append("🗳 صوّت عبر رابط التعليق ثم اضغط «صوّتت».")
+            kb.button(text="🗳 افتح رابط التصويت", url=data)
+            kb.button(text="✅ صوّتت", callback_data=f"vconf:{ev['id']}")
         elif code == "username":
             lines.append(t(lang, "f_username"))
         elif code == "photo":
@@ -284,6 +294,31 @@ async def join(cb: CallbackQuery, bot: Bot):
                            "AND p.user_id=i.user_id WHERE i.event_id=? AND i.inviter_id=?", ev_id, cb.from_user.id)
         await cb.message.answer(f"🎟 ارفع فرصك! كل صديق يشارك عبر رابطك يعطيك فرصة إضافية (حتى {ev['invite_bonus']}).\n"
                                 f"🔗 {link}\n\nفرصك الآن: {1 + min(cnt, ev['invite_bonus'])}")
+
+
+@router.callback_query(F.data.startswith("aprv:"))
+async def admin_approve(cb: CallbackQuery):
+    """المالك/المشرف يعتمد شرط بريميوم أو تعليق يدوياً لنفسه ثم يضغط «تحقق»."""
+    if not ctx.is_admin(cb.from_user.id):
+        return await cb.answer("🚫 للمالك والمشرفين فقط.", show_alert=True)
+    try:
+        _, ev_id, code = cb.data.split(":")
+        ev_id = int(ev_id)
+    except ValueError:
+        return await cb.answer()
+    if code not in ("premium", "comment"):
+        return await cb.answer()
+    await ctx.db.run("INSERT OR IGNORE INTO admin_overrides(event_id,user_id,code) VALUES(?,?,?)",
+                     ev_id, cb.from_user.id, code)
+    await audit(ctx.db, cb.from_user.id, "admin_approve", f"event={ev_id} code={code}")
+    await cb.answer("✅ تم الاعتماد، اضغط «تحقق».", show_alert=True)
+
+
+@router.callback_query(F.data.startswith("vconf:"))
+async def vconf(cb: CallbackQuery):
+    await ctx.db.run("INSERT OR IGNORE INTO vote_confirms(event_id,user_id) VALUES(?,?)",
+                     int(cb.data[6:]), cb.from_user.id)
+    await cb.answer("✅ اضغط «تحقق» للمتابعة.")
 
 
 @router.callback_query(F.data.startswith("conf:"))

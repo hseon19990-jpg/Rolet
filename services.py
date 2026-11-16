@@ -245,27 +245,39 @@ async def mandatory_list(db, ev=None):
 
 
 async def check_user(bot, db, ev, user_id):
-    """يرجع قائمة الشروط الناقصة [(code, data)]؛ فارغة = مؤهل."""
+    """يرجع قائمة الشروط الناقصة [(code, data)]؛ فارغة = مؤهل.
+    المالك والمشرفون: يتجاوزون الكابتشا واليوزر والصورة تلقائياً،
+    وشروط بريميوم/تعليق يعتمدونها يدوياً بزر (جدول admin_overrides)."""
+    is_adm = ctx.is_admin(user_id)
     u = await db.one("SELECT * FROM users WHERE user_id=?", user_id)
     if not u or u["banned"]:
         return [("banned", None)]
+
+    async def approved(code):
+        return is_adm and await db.val(
+            "SELECT 1 FROM admin_overrides WHERE event_id=? AND user_id=? AND code=?", ev["id"], user_id, code)
+
     fails = []
-    if not u["verified"]:
+    if not u["verified"] and not is_adm:
         fails.append(("captcha", None))
     for ch in await mandatory_list(db, ev):
         if await is_member(bot, ch["chat_id"], user_id) is False:
             fails.append(("channel", ch))
-    if ev["need_premium"] and not u["is_premium"]:
+    if ev["need_premium"] and not u["is_premium"] and not await approved("premium"):
         fails.append(("premium", None))
     if ev["comment_text"] and not await db.val(
-            "SELECT 1 FROM comment_hits WHERE event_id=? AND user_id=?", ev["id"], user_id):
+            "SELECT 1 FROM comment_hits WHERE event_id=? AND user_id=?", ev["id"], user_id) \
+            and not await approved("comment"):
         fails.append(("comment", ev["comment_text"]))
     if ev["need_bot_url"] and not await db.val(
             "SELECT 1 FROM confirms WHERE event_id=? AND user_id=?", ev["id"], user_id):
         fails.append(("botconfirm", ev["need_bot_url"]))
-    if db.get("require_username") == "1" and not u["username"]:
+    if ev["vote_url"] and not await db.val(
+            "SELECT 1 FROM vote_confirms WHERE event_id=? AND user_id=?", ev["id"], user_id):
+        fails.append(("voteconfirm", ev["vote_url"]))
+    if db.get("require_username") == "1" and not u["username"] and not is_adm:
         fails.append(("username", None))
-    if db.get("require_photo") == "1":
+    if db.get("require_photo") == "1" and not is_adm:
         try:
             photos = await bot.get_user_profile_photos(user_id, limit=1)
             if photos.total_count == 0:
@@ -297,9 +309,12 @@ async def event_text(db, ev):
     if ev["need_premium"]:
         conds.append("• حساب تليجرام بريميوم")
     if ev["comment_text"]:
-        conds.append(f"• تعليق «{esc(ev['comment_text'])}» في نقاش القناة")
+        where = f'<a href="{ev["comment_url"]}">الكروب</a>' if ev["comment_url"] else "الكروب المحدد"
+        conds.append(f"• تعليق «{esc(ev['comment_text'])}» في {where}")
     if ev["need_bot_url"]:
         conds.append("• تفعيل بوت معيّن")
+    if ev["vote_url"]:
+        conds.append(f'• <a href="{ev["vote_url"]}">التصويت عبر رابط التعليق</a>')
     if conds:
         lines.append("\n📌 الشروط:\n" + "\n".join(conds))
     return "\n".join(lines)
@@ -492,6 +507,9 @@ async def notify_thresholds(bot, db):
             await safe_send(bot, l["owner_id"], f"🔥 اقتربت! وصلت إلى {valid} من {thr} عضو معتمد.")
 
 
+_warned_comment = set()
+
+
 async def check_channels(bot, db):
     for ch in await db.all("SELECT * FROM channels WHERE active=1"):
         try:
@@ -503,6 +521,19 @@ async def check_channels(bot, db):
             await db.run("UPDATE channels SET active=0 WHERE chat_id=?", ch["chat_id"])
             await safe_send(bot, ch["owner_id"], f"⚠️ البوت لم يعد مشرفاً في «{esc(ch['title'] or '')}». "
                                                  f"تم إخفاء القناة من الأقسام حتى تعيد إضافتي كمشرف.")
+    for ev in await db.all("SELECT id,owner_id,title,comment_chat FROM events "
+                           "WHERE status='active' AND comment_chat IS NOT NULL"):
+        try:
+            me = await bot.get_chat_member(ev["comment_chat"], bot.id)
+            ok = me.status == "administrator"
+        except Exception:
+            ok = False
+        if not ok and ev["id"] not in _warned_comment:
+            _warned_comment.add(ev["id"])
+            await safe_send(bot, ev["owner_id"], f"⚠️ البوت لم يعد مشرفاً بكروب التعليق في فعالية «{esc(ev['title'])}» "
+                                                 f"(#{ev['id']}). لن تُحتسب التعليقات حتى تعيده مشرفاً.")
+        elif ok:
+            _warned_comment.discard(ev["id"])
     for ch in await db.all("SELECT * FROM mandatory_channels"):
         try:
             me = await bot.get_chat_member(ch["chat_id"], bot.id)

@@ -36,7 +36,7 @@ CREATE TABLE IF NOT EXISTS events(
  created_at INTEGER, end_at INTEGER, need_premium INTEGER DEFAULT 0, comment_chat INTEGER,
  comment_text TEXT, need_bot_url TEXT, reminded INTEGER DEFAULT 0, spike_alerted INTEGER DEFAULT 0, proof TEXT,
  invite_bonus INTEGER DEFAULT 0, featured INTEGER DEFAULT 0, notify_owner INTEGER DEFAULT 1,
- promo_text TEXT, min_members INTEGER DEFAULT 0, max_channels INTEGER DEFAULT 10);
+ promo_text TEXT, min_members INTEGER DEFAULT 0, max_channels INTEGER DEFAULT 10, comment_url TEXT, vote_url TEXT);
 CREATE TABLE IF NOT EXISTS event_entries(
  event_id INTEGER, chat_id INTEGER, user_id INTEGER, title TEXT, members INTEGER, message_id INTEGER,
  created_at INTEGER, PRIMARY KEY(event_id, chat_id));
@@ -54,6 +54,8 @@ CREATE TABLE IF NOT EXISTS winners(
  event_id INTEGER, user_id INTEGER, place INTEGER, PRIMARY KEY(event_id, user_id));
 CREATE TABLE IF NOT EXISTS comment_hits(event_id INTEGER, user_id INTEGER, PRIMARY KEY(event_id, user_id));
 CREATE TABLE IF NOT EXISTS confirms(event_id INTEGER, user_id INTEGER, PRIMARY KEY(event_id, user_id));
+CREATE TABLE IF NOT EXISTS vote_confirms(event_id INTEGER, user_id INTEGER, PRIMARY KEY(event_id, user_id));
+CREATE TABLE IF NOT EXISTS admin_overrides(event_id INTEGER, user_id INTEGER, code TEXT, PRIMARY KEY(event_id, user_id, code));
 CREATE TABLE IF NOT EXISTS event_invites(
  event_id INTEGER, user_id INTEGER, inviter_id INTEGER, PRIMARY KEY(event_id, user_id));
 CREATE TABLE IF NOT EXISTS flags(owner_id INTEGER PRIMARY KEY, reason TEXT, created_at INTEGER);
@@ -74,7 +76,7 @@ class DB:
         self.conn.execute("PRAGMA busy_timeout=5000")
         self.conn.executescript(SCHEMA)
         for col in ("invite_bonus INTEGER DEFAULT 0", "featured INTEGER DEFAULT 0", "notify_owner INTEGER DEFAULT 1",
-                    "promo_text TEXT", "min_members INTEGER DEFAULT 0", "max_channels INTEGER DEFAULT 10"):  # ترقية قواعد قديمة
+                    "promo_text TEXT", "min_members INTEGER DEFAULT 0", "max_channels INTEGER DEFAULT 10", "comment_url TEXT", "vote_url TEXT"):  # ترقية قواعد قديمة
             try:
                 self.conn.execute(f"ALTER TABLE events ADD COLUMN {col}")
             except sqlite3.OperationalError:
