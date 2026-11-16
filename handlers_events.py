@@ -45,6 +45,10 @@ class Entry(StatesGroup):
     wait = State()
 
 
+class EvCh(StatesGroup):
+    wait = State()
+
+
 async def lang_of(uid):
     return await ctx.db.val("SELECT lang FROM users WHERE user_id=?", uid) or "ar"
 
@@ -310,7 +314,9 @@ async def show_conditions(target, state, edit=None):
     lines = [f"📝 <b>{esc(d['title'])}</b>",
              f"{KIND_LABEL[d['kind']]} • 👑 {d['winners']} • ⏰ " + ("مفتوح" if d['hours'] > 24 * 365 else f"{d['hours']} ساعة")
              + ((f" • 🗳 {d['goal']} صوت" if d["kind"] == "votes" else f" • 👥 {d['goal']} منضم") if d.get("goal") else ""), "",
-             "📌 <b>الشروط الإضافية</b> (الاشتراك بقنوات المالك الإجبارية يُطبَّق تلقائياً):",
+             "📌 <b>الشروط</b> (قنوات مالك البوت الإجبارية تُطبَّق تلقائياً على الجميع ولا يمكن إزالتها):",
+             f"🔐 التحقق (كابتشا): {'✅ مطلوب' if d.get('verify', True) else '❌ بدون تحقق'}",
+             f"📺 الاشتراك بقناة الفعالية: {'✅ إجباري' if d.get('own', True) else '❌ غير إجباري'}",
              f"💎 بريميوم: {'✅' if d.get('premium') else '❌'}",
              f"💬 تعليق: {'✅' if (d.get('comment_chat') or d.get('comment_url')) else '❌'}",
              f"🤖 تفعيل بوت: {'✅' if d.get('bot_url') else '❌'}",
@@ -322,17 +328,19 @@ async def show_conditions(target, state, edit=None):
         lines.append(f"👥 أقل أعضاء بالقناة: {d.get('min_members', 0)}")
     if ctx.is_owner(state.key.user_id):   # يظهر لمالك البوت فقط، وبالخاص
         lines.insert(5, f"🎯 تحديد الفائز: {'يدوي' if d.get('draw_mode') == 'manual' else 'عشوائي'}")
+    B = InlineKeyboardButton
     kb = InlineKeyboardBuilder()
-    kb.button(text="💎 بريميوم", callback_data="c:prem")
-    kb.button(text="💬 تعليق", callback_data="c:com")
-    kb.button(text="🤖 تفعيل بوت", callback_data="c:bot")
-    kb.button(text="🗳 تصويت", callback_data="c:vote")
-    kb.button(text="📢 قناة اشتراك", callback_data="c:chan")
+    kb.row(B(text=f"🔐 التحقق: {'✅' if d.get('verify', True) else '❌'}", callback_data="c:ver"),
+           B(text=f"📺 قناة الفعالية: {'✅' if d.get('own', True) else '❌'}", callback_data="c:own"))
+    kb.row(B(text="📢 إضافة قناة اشتراك", callback_data="c:chan"))
+    if d.get("extra"):
+        kb.row(B(text="🗑 إزالة قناة اشتراك", callback_data="c:xdel"))
+    kb.row(B(text="💎 بريميوم", callback_data="c:prem"), B(text="💬 تعليق", callback_data="c:com"))
+    kb.row(B(text="🤖 تفعيل بوت", callback_data="c:bot"), B(text="🗳 تصويت", callback_data="c:vote"))
     if d["kind"] == "roulette":
-        kb.button(text="🎟 فرص بالدعوة", callback_data="c:inv")
-    kb.button(text="🚀 نشر الفعالية", callback_data="c:done")
-    kb.button(text="❌ إلغاء", callback_data="c:cancel")
-    kb.adjust(2, 2, 2, 1, 1)
+        kb.row(B(text="🎟 فرص بالدعوة", callback_data="c:inv"))
+    kb.row(B(text="🚀 نشر الفعالية", callback_data="c:done"))
+    kb.row(B(text="❌ إلغاء", callback_data="c:cancel"))
     await target.answer("\n".join(lines), reply_markup=kb.as_markup())
 
 
@@ -344,6 +352,36 @@ async def cb_cond(cb: CallbackQuery, state: FSMContext, bot: Bot):
         await state.clear()
         await cb.answer()
         return await cb.message.answer("تم الإلغاء.", reply_markup=home_kb(await lang_of(cb.from_user.id)))
+    if act == "ver":
+        await state.update_data(verify=not d.get("verify", True))
+        await cb.answer("✅")
+        return await show_conditions(cb.message, state)
+    if act == "own":
+        await state.update_data(own=not d.get("own", True))
+        await cb.answer("✅")
+        return await show_conditions(cb.message, state)
+    if act == "xdel":
+        extra = d.get("extra", [])
+        if not extra:
+            await cb.answer("لا توجد قنوات إضافية.")
+            return await show_conditions(cb.message, state)
+        kb = InlineKeyboardBuilder()
+        for i, ch in enumerate(extra):
+            kb.button(text=f"🗑 {ch.get('title') or ch['chat_id']}", callback_data=f"c:xd:{i}")
+        kb.button(text="↩️ رجوع", callback_data="c:xd:back")
+        kb.adjust(1)
+        await cb.answer()
+        return await cb.message.answer("اختر القناة اللي تبي تشيلها من الشروط:", reply_markup=kb.as_markup())
+    if act.startswith("xd:"):
+        idx = act[3:]
+        if idx.isdigit() and int(idx) < len(d.get("extra", [])):
+            extra = list(d["extra"])
+            extra.pop(int(idx))
+            await state.update_data(extra=extra)
+            await cb.answer("🗑 تم")
+        else:
+            await cb.answer()
+        return await show_conditions(cb.message, state)
     if act == "prem":
         await state.update_data(premium=not d.get("premium"))
         await cb.answer("✅")
@@ -537,13 +575,22 @@ async def publish(cb, state, bot):
         return await cb.message.answer("❌ البوت ليس مشرفاً في قناة النشر. اجعله مشرفاً فيها ثم انشر مرة ثانية.")
     eid = await db.insert(
         "INSERT INTO events(owner_id,kind,title,prize,winners,channel_id,created_at,end_at,need_premium,"
-        "comment_chat,comment_text,need_bot_url,invite_bonus,promo_text,min_members,max_channels,comment_url,vote_url,draw_mode,approve_mode,vote_goal,join_goal) "
-        "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        "comment_chat,comment_text,need_bot_url,invite_bonus,promo_text,min_members,max_channels,comment_url,vote_url,draw_mode,approve_mode,vote_goal,join_goal,verify) "
+        "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
         uid, d["kind"], d["title"], d.get("prize"), d["winners"], d.get("channel"), now(),
         now() + int(d["hours"] * 3600), int(bool(d.get("premium"))), d.get("comment_chat"),
         d.get("comment_text"), d.get("bot_url"), int(d.get("invite", 0) or 0), d.get("promo"),
         int(d.get("min_members", 0)), int(ctx.db.get("chroulette_max_channels")), d.get("comment_url"), d.get("vote_url"),
-        (d.get("draw_mode") or "auto") if ctx.is_owner(uid) else "auto", int(d.get("approve", 0)), (int(d.get("goal", 0) or 0) if d["kind"] == "votes" else 0), (int(d.get("goal", 0) or 0) if d["kind"] != "votes" else 0))
+        (d.get("draw_mode") or "auto") if ctx.is_owner(uid) else "auto", int(d.get("approve", 0)), (int(d.get("goal", 0) or 0) if d["kind"] == "votes" else 0), (int(d.get("goal", 0) or 0) if d["kind"] != "votes" else 0),
+        int(bool(d.get("verify", True))))
+    if d.get("own", True) and d.get("channel"):   # قناة الفعالية إجبارية افتراضياً (المنظّم يقدر يشيلها)
+        try:
+            och = await bot.get_chat(d["channel"])
+            ourl = await channel_url(bot, och)
+            await db.run("INSERT OR IGNORE INTO event_channels(event_id,chat_id,title,username,url) VALUES(?,?,?,?,?)",
+                         eid, och.id, och.title, och.username, ourl)
+        except Exception:
+            pass
     for ch in d.get("extra", []):
         await db.run("INSERT OR IGNORE INTO event_channels(event_id,chat_id,title,username,url) VALUES(?,?,?,?,?)",
                      eid, ch["chat_id"], ch["title"], ch["username"], ch["url"])
@@ -622,6 +669,8 @@ async def manage_view(cb, ev):
             kb.button(text="🎯 اختيار الفائز يدوياً", callback_data=f"evpick:{ev['id']}")
         kb.button(text="⏱ +1 ساعة", callback_data=f"evext:{ev['id']}:1")
         kb.button(text="⏱ +24 ساعة", callback_data=f"evext:{ev['id']}:24")
+        kb.button(text=f"🔐 التحقق: {'✅ مطلوب' if ev['verify'] else '❌ بدون'}", callback_data=f"evver:{ev['id']}")
+        kb.button(text="📢 القنوات الإجبارية للفعالية", callback_data=f"evmc:{ev['id']}")
         kb.button(text="🤝 مشاركة/نقل الصلاحيات", callback_data=f"evshr:{ev['id']}")
         kb.button(text="❌ إلغاء الفعالية", callback_data=f"evcan:{ev['id']}")
         if ev["kind"] != "votes":
@@ -630,6 +679,93 @@ async def manage_view(cb, ev):
     kb.adjust(1)
     await show(cb, txt, kb.as_markup())
     await cb.answer()
+
+
+@router.callback_query(F.data.startswith("evver:"))
+async def ev_toggle_verify(cb: CallbackQuery, bot: Bot):
+    ev = await owned_event(cb, int(cb.data[6:]))
+    if not ev:
+        return
+    await ctx.db.run("UPDATE events SET verify=1-COALESCE(verify,1) WHERE id=?", ev["id"])
+    await audit(ctx.db, cb.from_user.id, "event_verify_toggle", ev["id"])
+    ev = await ctx.db.one("SELECT * FROM events WHERE id=?", ev["id"])
+    await refresh_post(bot, ctx.db, ev["id"], force=True)
+    await manage_view(cb, ev)
+
+
+async def mand_view(cb, ev):
+    db = ctx.db
+    rows = await db.all("SELECT chat_id,title FROM event_channels WHERE event_id=?", ev["id"])
+    glob = await db.all("SELECT title FROM mandatory_channels")
+    txt = "📢 <b>القنوات الإجبارية لفعاليتك</b>\nكل مشارك أو مصوّت لازم يكون منضماً لها كلها.\n\n"
+    txt += ("\n".join(f"• {esc(r['title'] or r['chat_id'])}" for r in rows) if rows else "لا توجد قنوات (قناتك غير إجبارية حالياً).")
+    if glob:
+        txt += "\n\n🔒 <b>قنوات المالك الأصلي</b> (مفروضة على الجميع ولا يمكن إزالتها):\n" + \
+               "\n".join(f"• {esc(g['title'] or '')}" for g in glob)
+    kb = InlineKeyboardBuilder()
+    for r in rows:
+        kb.button(text=f"🗑 {r['title'] or r['chat_id']}", callback_data=f"evmcd:{ev['id']}:{r['chat_id']}")
+    kb.button(text="➕ إضافة قناة", callback_data=f"evmca:{ev['id']}")
+    kb.button(text="⬅️", callback_data=f"evm:{ev['id']}")
+    kb.adjust(1)
+    await show(cb, txt, kb.as_markup())
+    await cb.answer()
+
+
+@router.callback_query(F.data.startswith("evmc:"))
+async def ev_mand(cb: CallbackQuery):
+    ev = await owned_event(cb, int(cb.data[5:]))
+    if ev:
+        await mand_view(cb, ev)
+
+
+@router.callback_query(F.data.startswith("evmcd:"))
+async def ev_mand_del(cb: CallbackQuery, bot: Bot):
+    _, eid, chat_id = cb.data.split(":")
+    ev = await owned_event(cb, int(eid))
+    if not ev:
+        return
+    await ctx.db.run("DELETE FROM event_channels WHERE event_id=? AND chat_id=?", ev["id"], int(chat_id))
+    await audit(ctx.db, cb.from_user.id, "event_mand_del", f"{eid}:{chat_id}")
+    await refresh_post(bot, ctx.db, ev["id"], force=True)
+    await mand_view(cb, ev)
+
+
+@router.callback_query(F.data.startswith("evmca:"))
+async def ev_mand_add(cb: CallbackQuery, state: FSMContext):
+    ev = await owned_event(cb, int(cb.data[6:]))
+    if not ev:
+        return
+    await state.clear()
+    await state.set_state(EvCh.wait)
+    await state.update_data(ev_id=ev["id"])
+    await cb.answer()
+    await cb.message.answer("📢 أرسل القناة بأي شكل: رابط أو @يوزر أو ايدي أو منشور محوّل.\n(للإلغاء: /cancel)")
+
+
+@router.message(StateFilter(EvCh.wait), F.text | F.forward_origin)
+async def ev_mand_add_msg(m: Message, state: FSMContext, bot: Bot):
+    d = await state.get_data()
+    ev = await ctx.db.one("SELECT * FROM events WHERE id=?", d.get("ev_id", 0))
+    uid = m.from_user.id
+    if not ev or (ev["owner_id"] != uid and not ctx.is_admin(uid) and not await ctx.db.one(
+            "SELECT 1 FROM event_managers WHERE event_id=? AND user_id=?", ev["id"], uid)):
+        await state.clear()
+        return await m.answer("غير مسموح")
+    chat, note, err = await resolve_channel_loose(m, bot)
+    if err:
+        return await m.answer(err)
+    url = await channel_url(bot, chat)
+    await ctx.db.run("INSERT INTO event_channels(event_id,chat_id,title,username,url) VALUES(?,?,?,?,?) "
+                     "ON CONFLICT(event_id,chat_id) DO UPDATE SET title=excluded.title, username=excluded.username, url=excluded.url",
+                     ev["id"], chat.id, chat.title, chat.username, url)
+    await audit(ctx.db, uid, "event_mand_add", f"{ev['id']}:{chat.id}")
+    await state.clear()
+    await refresh_post(bot, ctx.db, ev["id"], force=True)
+    kb = InlineKeyboardBuilder()
+    kb.button(text="📢 القنوات الإجبارية", callback_data=f"evmc:{ev['id']}")
+    await m.answer(f"✅ أضفت «{esc(chat.title or '')}» كقناة إجبارية للفعالية." + (f"\n\n{note}" if note else ""),
+                   reply_markup=kb.as_markup())
 
 
 @router.callback_query(F.data.startswith("evend:"))

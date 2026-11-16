@@ -80,7 +80,7 @@ async def adm_help(cb: CallbackQuery):
         "/set المفتاح القيمة\n"
         "/linkprice كود السعر • /linkthr كود العدد\n"
         "/addmod ID • /delmod ID\n"
-        "/broadcast [ar|en|all]"), back_kb())
+        "/broadcast (يفتح قائمة الإذاعة)"), back_kb())
     await cb.answer()
 
 
@@ -178,17 +178,29 @@ async def pay_decide(cb: CallbackQuery, bot: Bot):
 @router.callback_query(F.data == "adm:mand")
 async def adm_mand(cb: CallbackQuery):
     rows = await ctx.db.all("SELECT * FROM mandatory_channels")
+    on = ctx.db.get("gate_on") == "1"
     kb = InlineKeyboardBuilder()
     for r in rows:
         kb.button(text=f"🗑 {r['title']}", callback_data=f"mand:del:{r['chat_id']}")
     if owner_only(cb.from_user.id):
         kb.button(text="➕ إضافة قناة إجبارية", callback_data="mand:add")
+        kb.button(text=f"🔒 الاشتراك الإجباري: {'✅ مفعّل' if on else '❌ معطّل'}", callback_data="mand:toggle")
     kb.button(text="⬅️ اللوحة", callback_data="adm:home")
     kb.adjust(1)
-    await show(cb, "📢 <b>القنوات الإجبارية العامة</b> (تُطبَّق على كل الفعاليات)\n"
-                   "اضغط «إضافة» وأرسل القناة بأي شكل (رابط / @يوزر / ايدي / منشور محوّل).\n"
-                   + ("" if rows else "\nلا توجد قنوات."), kb.as_markup())
+    body = "\n".join(f"• {esc(r['title'] or r['chat_id'])}" for r in rows) if rows else "لا توجد قنوات."
+    await show(cb, "📢 <b>قنواتك الإجبارية (المالك الأصلي)</b>\n"
+                   "مفروضة على <b>كل</b> مستخدم للبوت ولكل فعالية، ولا يستطيع منظّمو الفعاليات إزالتها.\n"
+                   "اضغط «إضافة» وأرسل القناة بأي شكل (رابط / @يوزر / ايدي / منشور محوّل).\n\n" + body, kb.as_markup())
     await cb.answer()
+
+
+@router.callback_query(F.data == "mand:toggle")
+async def mand_toggle(cb: CallbackQuery):
+    if not owner_only(cb.from_user.id):
+        return await cb.answer("للمالك فقط", show_alert=True)
+    await ctx.db.set("gate_on", "0" if ctx.db.get("gate_on") == "1" else "1")
+    await audit(ctx.db, cb.from_user.id, "gate_toggle", ctx.db.get("gate_on"))
+    await adm_mand(cb)
 
 
 @router.callback_query(F.data == "mand:add")
@@ -435,22 +447,66 @@ async def backup(ev):
 
 
 # ───────────── الإذاعة ─────────────
-@router.message(Command("broadcast"))
-async def cmd_broadcast(m: Message, command: CommandObject, state: FSMContext):
-    if not owner_only(m.from_user.id):
-        return await m.answer("للمالك فقط")
-    scope = (command.args or "all").strip()
-    if scope not in ("all", "ar", "en"):
-        scope = "all"
-    await state.set_state(BC.wait)
-    await state.update_data(scope=scope)
-    await m.answer(f"📣 أرسل الرسالة اللي تريد إذاعتها (الفئة: {scope}). للإلغاء /cancel")
+BC_STOP = set()   # ايديات المالكين الذين ضغطوا «إيقاف» أثناء الإذاعة
+
+AUDIENCES = {
+    "all": ("👥 كل من استخدم البوت", "banned=0 AND blocked_bot=0", []),
+    "ar": ("🇸🇦 العربية فقط", "banned=0 AND blocked_bot=0 AND lang='ar'", []),
+    "en": ("🇬🇧 الإنجليزية فقط", "banned=0 AND blocked_bot=0 AND lang='en'", []),
+    "org": ("🎯 منظّمو الفعاليات فقط", "banned=0 AND blocked_bot=0 AND user_id IN (SELECT DISTINCT owner_id FROM events)", []),
+    "act": ("🔥 النشطون آخر 7 أيام", "banned=0 AND blocked_bot=0 AND last_seen>=?", "week"),
+}
+
+
+def aud_where(scope):
+    _, where, args = AUDIENCES.get(scope, AUDIENCES["all"])
+    return where, ([now() - 7 * 86400] if args == "week" else list(args))
+
+
+async def bc_menu(target_cb=None, target_msg=None):
+    kb = InlineKeyboardBuilder()
+    for key, (label, _w, _a) in AUDIENCES.items():
+        where, args = aud_where(key)
+        n = await ctx.db.val(f"SELECT COUNT(*) FROM users WHERE {where}", *args)
+        kb.button(text=f"{label} ({n})", callback_data=f"bc:aud:{key}")
+    kb.button(text="⬅️ اللوحة", callback_data="adm:home")
+    kb.adjust(1)
+    txt = "📣 <b>إذاعة</b>\nاختر الفئة التي ستصلها الرسالة (من حظروا البوت أو المحظورون لا يُرسل لهم):"
+    if target_cb:
+        await show(target_cb, txt, kb.as_markup())
+        await target_cb.answer()
+    else:
+        await target_msg.answer(txt, reply_markup=kb.as_markup())
 
 
 @router.callback_query(F.data == "adm:bc")
-async def adm_bc(cb: CallbackQuery):
-    await cb.message.answer("📣 للإذاعة استخدم: /broadcast [all|ar|en]")
+async def adm_bc(cb: CallbackQuery, state: FSMContext):
+    if not owner_only(cb.from_user.id):
+        return await cb.answer("للمالك فقط", show_alert=True)
+    await state.clear()
+    await bc_menu(target_cb=cb)
+
+
+@router.message(Command("broadcast"))
+async def cmd_broadcast(m: Message, state: FSMContext):
+    if not owner_only(m.from_user.id):
+        return await m.answer("للمالك فقط")
+    await state.clear()
+    await bc_menu(target_msg=m)
+
+
+@router.callback_query(F.data.startswith("bc:aud:"))
+async def bc_pick(cb: CallbackQuery, state: FSMContext):
+    if not owner_only(cb.from_user.id):
+        return await cb.answer("للمالك فقط", show_alert=True)
+    scope = cb.data.split(":")[2]
+    if scope not in AUDIENCES:
+        return await cb.answer()
+    await state.set_state(BC.wait)
+    await state.update_data(scope=scope)
     await cb.answer()
+    await cb.message.answer(f"✍️ أرسل الآن الرسالة اللي تبي تذيعها ({AUDIENCES[scope][0]}).\n"
+                            "تقدر ترسل نص أو صورة أو فيديو أو ملف (مع التنسيق والأزرار كما هي).\nللإلغاء: /cancel")
 
 
 @router.message(Command("cancel"))
@@ -461,40 +517,67 @@ async def adm_cancel(m: Message, state: FSMContext):
 
 @router.message(BC.wait)
 async def bc_msg(m: Message, state: FSMContext):
+    if not owner_only(m.from_user.id):
+        return
     d = await state.get_data()
-    where, args = "banned=0 AND blocked_bot=0", []
-    if d["scope"] != "all":
-        where += " AND lang=?"
-        args.append(d["scope"])
+    where, args = aud_where(d.get("scope", "all"))
     n = await ctx.db.val(f"SELECT COUNT(*) FROM users WHERE {where}", *args)
     await state.update_data(chat_id=m.chat.id, mid=m.message_id, where=where, args=args)
     kb = InlineKeyboardBuilder()
     kb.button(text=f"✅ إرسال إلى {n}", callback_data="bc:go")
     kb.button(text="❌ إلغاء", callback_data="bc:no")
     kb.adjust(1)
-    await m.answer("تأكيد الإذاعة؟", reply_markup=kb.as_markup())
+    await m.answer(f"👆 هذي معاينة رسالتك. تأكيد إذاعتها إلى <b>{n}</b> مستخدم؟", reply_markup=kb.as_markup(),
+                   reply_to_message_id=m.message_id)
 
 
 @router.callback_query(F.data == "bc:no")
 async def bc_no(cb: CallbackQuery, state: FSMContext):
     await state.clear()
     await cb.answer("أُلغيت")
+    try:
+        await cb.message.edit_text("❌ أُلغيت الإذاعة.")
+    except Exception:
+        pass
 
 
 @router.callback_query(F.data == "bc:go")
 async def bc_go(cb: CallbackQuery, state: FSMContext, bot: Bot):
+    if not owner_only(cb.from_user.id):
+        return await cb.answer("للمالك فقط", show_alert=True)
     d = await state.get_data()
     await state.clear()
     if not d.get("mid"):
         return await cb.answer("انتهت الجلسة")
     await cb.answer("بدأت الإذاعة")
-    asyncio.create_task(run_broadcast(bot, cb.from_user.id, d))
+    BC_STOP.discard(cb.from_user.id)
+    kb = InlineKeyboardBuilder()
+    kb.button(text="⏹ إيقاف الإذاعة", callback_data="bc:stop")
+    try:
+        await cb.message.edit_text("📣 جاري الإذاعة...", reply_markup=kb.as_markup())
+    except Exception:
+        pass
+    asyncio.create_task(run_broadcast(bot, cb.from_user.id, d, cb.message))
 
 
-async def run_broadcast(bot, admin_id, d):
+@router.callback_query(F.data == "bc:stop")
+async def bc_stop(cb: CallbackQuery):
+    if not owner_only(cb.from_user.id):
+        return await cb.answer("للمالك فقط", show_alert=True)
+    BC_STOP.add(cb.from_user.id)
+    await cb.answer("سيتوقف بعد الرسالة الحالية")
+
+
+async def run_broadcast(bot, admin_id, d, progress=None):
     rows = await ctx.db.all(f"SELECT user_id FROM users WHERE {d['where']}", *d["args"])
+    total = len(rows)
     ok = fail = 0
-    for r in rows:
+    stopped = False
+    for i, r in enumerate(rows, 1):
+        if admin_id in BC_STOP:
+            BC_STOP.discard(admin_id)
+            stopped = True
+            break
         while True:
             try:
                 await bot.copy_message(r["user_id"], d["chat_id"], d["mid"])
@@ -509,9 +592,24 @@ async def run_broadcast(bot, admin_id, d):
             except Exception:
                 fail += 1
                 break
+        if progress and i % 50 == 0:
+            try:
+                kb = InlineKeyboardBuilder()
+                kb.button(text="⏹ إيقاف الإذاعة", callback_data="bc:stop")
+                await progress.edit_text(f"📣 جاري الإذاعة... {i}/{total}", reply_markup=kb.as_markup())
+            except Exception:
+                pass
         await asyncio.sleep(0.05)
-    await audit(ctx.db, admin_id, "broadcast", f"ok={ok} fail={fail}")
-    await safe_send(bot, admin_id, f"📣 انتهت الإذاعة: وصلت {ok} • فشلت {fail}")
+    await audit(ctx.db, admin_id, "broadcast", f"ok={ok} fail={fail} stopped={stopped}")
+    report = (f"📣 {'تم إيقاف الإذاعة' if stopped else 'انتهت الإذاعة'}\n"
+              f"✅ وصلت: {ok}\n❌ فشلت (حظروا البوت أو غير متاح): {fail}\n👥 الإجمالي المستهدف: {total}")
+    if progress:
+        try:
+            await progress.edit_text(report)
+        except Exception:
+            await safe_send(bot, admin_id, report)
+    else:
+        await safe_send(bot, admin_id, report)
 
 
 @router.message(Command("flags"))

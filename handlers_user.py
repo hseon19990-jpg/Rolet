@@ -61,10 +61,8 @@ async def gate(target, uid, bot):
         missing = await gate_missing(bot, db, uid)   # الاشتراك الإجباري العام
         if missing:
             return await gate_screen(target, lang, missing)
-    if not user["verified"]:
-        if db.get("captcha_on") == "1":
-            return await send_captcha(target, uid, lang)
-        await db.run("UPDATE users SET verified=1 WHERE user_id=?", uid)
+    if not user["verified"] and db.get("captcha_on") == "1":   # كابتشا عامة اختيارية؛ الأصل أن التحقق يُطلب حسب الفعالية
+        return await send_captcha(target, uid, lang)
     payload = user["payload"] or ""
     await db.run("UPDATE users SET payload='' WHERE user_id=?", uid)
     await route(target, uid, lang, payload)
@@ -79,6 +77,49 @@ async def send_captcha(target, uid, lang):
         kb.button(text=e, callback_data=f"cap:{e}")
     kb.adjust(3)
     await target.answer(t(lang, "captcha", e=answer), reply_markup=kb.as_markup())
+
+
+_EV_RETRY = {}   # uid -> زر الفعالية الأصلي ليُكمل بعد التحقق
+
+
+async def send_event_captcha(target, uid, lang, ev_id, retry_cb):
+    choices = random.sample(EMOJIS, 6)
+    answer = random.choice(choices)
+    await ctx.db.run("UPDATE users SET captcha_answer=? WHERE user_id=?", answer, uid)
+    _EV_RETRY[uid] = (ev_id, retry_cb)
+    kb = InlineKeyboardBuilder()
+    for e in choices:
+        kb.button(text=e, callback_data=f"ecap:{ev_id}:{e}")
+    kb.adjust(3)
+    await target.answer(t(lang, "captcha", e=answer), reply_markup=kb.as_markup())
+
+
+@router.callback_query(F.data.startswith("ecap:"))
+async def ecap(cb: CallbackQuery, bot: Bot):
+    db = ctx.db
+    uid = cb.from_user.id
+    user = await db.one("SELECT * FROM users WHERE user_id=?", uid)
+    if not user:
+        return await cb.answer()
+    try:
+        _, ev_id, choice = cb.data.split(":", 2)
+        ev_id = int(ev_id)
+    except ValueError:
+        return await cb.answer()
+    lang = user["lang"]
+    if user["verified"]:
+        return await cb.answer("✅")
+    if choice == user["captcha_answer"]:
+        await db.run("UPDATE users SET verified=1, captcha_answer=NULL WHERE user_id=?", uid)
+        await cb.answer(t(lang, "captcha_ok"))
+        _, retry = _EV_RETRY.pop(uid, (ev_id, f"ev:{ev_id}"))
+        kb = InlineKeyboardBuilder()
+        kb.button(text=t(lang, "btn_continue"), callback_data=retry)
+        await cb.message.answer(t(lang, "captcha_ok"), reply_markup=kb.as_markup())
+    else:
+        await cb.answer(t(lang, "captcha_bad"), show_alert=True)
+        _, retry = _EV_RETRY.get(uid, (ev_id, f"ev:{ev_id}"))
+        await send_event_captcha(cb.message, uid, lang, ev_id, retry)
 
 
 @router.callback_query(F.data.startswith("cap:"))
@@ -265,6 +306,8 @@ async def fails_screen(cb, ev, fails, retry_cb):
     kb.button(text=t(lang, "btn_retry"), callback_data=retry_cb)
     kb.adjust(1)
     await cb.message.answer("\n".join(lines), reply_markup=kb.as_markup())
+    if any(code == "captcha" for code, _ in fails):
+        await send_event_captcha(cb.message, cb.from_user.id, lang, ev["id"], retry_cb)
     await cb.answer()
 
 

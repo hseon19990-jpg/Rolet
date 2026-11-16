@@ -101,12 +101,14 @@ async def validate_referrals(db, bot=None):
     cutoff = now() - int(float(db.get("hold_days")) * 86400)
     await db.run("UPDATE referrals SET status='invalid' WHERE status='pending' AND user_id IN "
                  "(SELECT user_id FROM users WHERE banned=1 OR blocked_bot=1)")
-    await db.run("UPDATE referrals SET status='invalid' WHERE status='pending' AND created_at<=? AND user_id IN "
-                 "(SELECT user_id FROM users WHERE verified=0)", cutoff)
+    need_captcha = db.get("captcha_on") == "1"   # التحقق صار يُطلب لكل فعالية، فلا نُسقط الإحالات بسببه إلا مع الكابتشا العامة
+    if need_captcha:
+        await db.run("UPDATE referrals SET status='invalid' WHERE status='pending' AND created_at<=? AND user_id IN "
+                     "(SELECT user_id FROM users WHERE verified=0)", cutoff)
     ready = [r["user_id"] for r in await db.all(
         "SELECT r.user_id FROM referrals r JOIN users u ON u.user_id=r.user_id WHERE r.status='pending' "
-        "AND r.created_at<=? AND u.verified=1 AND u.banned=0 AND u.blocked_bot=0 ORDER BY r.created_at LIMIT 300",
-        cutoff)]
+        "AND r.created_at<=? AND (u.verified=1 OR ?=0) AND u.banned=0 AND u.blocked_bot=0 ORDER BY r.created_at LIMIT 300",
+        cutoff, 1 if need_captcha else 0)]
     if not ready:
         return 0
     chans = await global_mandatory(db) if bot is not None else []
@@ -261,7 +263,8 @@ async def check_user(bot, db, ev, user_id):
             "SELECT 1 FROM admin_overrides WHERE event_id=? AND user_id=? AND code=?", ev["id"], user_id, code)
 
     fails = []
-    if not u["verified"]:   # التحقق مطلوب من الجميع بمن فيهم المالك والمشرفون
+    # التحقق (كابتشا) اختياري لكل فعالية: يقرره منظّمها (events.verify). إن طُلب فهو على الجميع بمن فيهم المشرفون
+    if ev.get("verify", 1) and not u["verified"]:
         fails.append(("captcha", None))
     for ch in await mandatory_list(db, ev):
         if await is_member(bot, ch["chat_id"], user_id) is False:
@@ -322,6 +325,8 @@ async def event_text(db, ev):
         conds.append("• تفعيل بوت معيّن")
     if ev["vote_url"]:
         conds.append(f'• <a href="{ev["vote_url"]}">التصويت عبر رابط التعليق</a>')
+    if ev.get("verify", 1):
+        conds.append("• 🔐 اجتياز التحقق (كابتشا)")
     if conds:
         lines.append("\n📌 الشروط:\n" + "\n".join(conds))
     return "\n".join(lines)
