@@ -1071,3 +1071,25 @@ async def scheduler(bot, db):
         except Exception:
             log.exception("scheduler error")
         await asyncio.sleep(30)
+
+
+async def sync_commands(bot):
+    """قائمة الاختصارات (زر Menu / علامة /): للجميع /start و/menu، وللمالك أوامر الإدارة، وللمشرفين /admin."""
+    from aiogram.types import BotCommand, BotCommandScopeChat, BotCommandScopeDefault
+    base = [BotCommand(command="start", description="🏠 القائمة الرئيسية"),
+            BotCommand(command="menu", description="📋 فتح القائمة")]
+    owner = base + [BotCommand(command="admin", description="⚙️ لوحة المالك"),
+                    BotCommand(command="set", description="🔧 تعديل الإعدادات"),
+                    BotCommand(command="broadcast", description="📢 إذاعة للأعضاء"),
+                    BotCommand(command="backup", description="🗄 نسخة احتياطية"),
+                    BotCommand(command="user", description="🔎 بحث عن مستخدم"),
+                    BotCommand(command="flags", description="🚩 المنظّمون المعلَّمون")]
+    mod = base + [BotCommand(command="admin", description="⚙️ لوحة الإدارة")]
+    try:
+        await bot.set_my_commands(base, scope=BotCommandScopeDefault())
+        for uid in OWNER_IDS:
+            await bot.set_my_commands(owner, scope=BotCommandScopeChat(chat_id=uid))
+        for uid in set(ctx.mods) - set(OWNER_IDS):
+            await bot.set_my_commands(mod, scope=BotCommandScopeChat(chat_id=uid))
+    except Exception:
+        log.info("set_my_commands failed", exc_info=True)

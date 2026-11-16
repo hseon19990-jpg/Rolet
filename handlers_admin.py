@@ -13,7 +13,7 @@ from aiogram.utils.keyboard import InlineKeyboardBuilder
 
 import ctx
 from config import EDITABLE
-from services import audit, decide_payout, mention, now, owner_quality, safe_send, top_channels
+from services import sync_commands, audit, decide_payout, mention, now, owner_quality, safe_send, top_channels
 from ui import channel_url, resolve_channel, resolve_channel_loose, show
 
 router = Router()
@@ -321,21 +321,27 @@ async def cmd_user(m: Message, command: CommandObject):
 
 
 @router.message(Command("addmod"))
-async def cmd_addmod(m: Message, command: CommandObject):
+async def cmd_addmod(m: Message, command: CommandObject, bot: Bot):
     if not owner_only(m.from_user.id) or not (command.args or "").isdigit():
         return await m.answer("للمالك: /addmod ID")
     await ctx.db.run("INSERT OR IGNORE INTO admins(user_id) VALUES(?)", int(command.args))
     ctx.mods.add(int(command.args))
     await audit(ctx.db, m.from_user.id, "addmod", command.args)
+    await sync_commands(bot)
     await m.answer("✅ صار مشرفاً (يدير الفعاليات والبلاغات والحظر، بدون الدفع والإعدادات).")
 
 
 @router.message(Command("delmod"))
-async def cmd_delmod(m: Message, command: CommandObject):
+async def cmd_delmod(m: Message, command: CommandObject, bot: Bot):
     if not owner_only(m.from_user.id) or not (command.args or "").isdigit():
         return await m.answer("للمالك: /delmod ID")
     await ctx.db.run("DELETE FROM admins WHERE user_id=?", int(command.args))
     ctx.mods.discard(int(command.args))
+    try:
+        from aiogram.types import BotCommandScopeChat
+        await bot.delete_my_commands(scope=BotCommandScopeChat(chat_id=int(command.args)))
+    except Exception:
+        pass
     await m.answer("✅ تم")
 
 

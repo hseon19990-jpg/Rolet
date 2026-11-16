@@ -5,3 +5,6 @@
  ⭐ نقاط كل إحالة
  🔑 سر الربط مع ستارت
 الشيء الوحيد خارج البوت: Railway ← خدمة روليت ← Settings ← Networking ← Generate Domain
+
+قائمة الاختصارات (زر Menu): للجميع /start و/menu • للمالك أيضاً /admin /set /broadcast /backup /user /flags • للمشرفين /admin.
+ملفات هذه الإضافة: services.py, main.py, handlers_admin.py (تحدّث القائمة عند تشغيل البوت وعند /addmod و/delmod)

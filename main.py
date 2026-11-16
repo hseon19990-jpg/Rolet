@@ -14,7 +14,7 @@ import handlers_events
 import handlers_user
 from db import DB
 from middleware import GateMiddleware
-from services import confirm_strat, entry_watcher, scheduler
+from services import confirm_strat, entry_watcher, scheduler, sync_commands
 
 
 async def start_web(bot):
@@ -61,6 +61,7 @@ async def main():
     dp.include_router(handlers_admin.router)
     dp.include_router(handlers_user.router)
     dp.include_router(handlers_events.router)
+    await sync_commands(bot)
     web_runner = await start_web(bot)  # noqa: F841
     task = asyncio.create_task(scheduler(bot, ctx.db))  # noqa: F841
     watcher = asyncio.create_task(entry_watcher(bot, ctx.db))  # noqa: F841
