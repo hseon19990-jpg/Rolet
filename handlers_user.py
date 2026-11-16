@@ -15,7 +15,7 @@ import ctx
 from config import OWNER_IDS
 from i18n import t
 from services import (KIND_ICON, check_spike, check_user, clear_gate, event_text, gate_missing, mention, notify_join,
-                      now, owner_links, refresh_post, schedule_refresh, owner_quality, record_referral, finish_event, resolve_source, retention_sample, safe_send,
+                      now, owner_links, refresh_post, schedule_refresh, owner_quality, record_referral, finish_event, check_join_goal, resolve_source, retention_sample, safe_send,
                       top_channels, create_payout, ensure_default_link, audit)
 from ui import gate_screen, home_kb, menu_kb, show
 
@@ -295,6 +295,7 @@ async def join(cb: CallbackQuery, bot: Bot):
     if n:
         schedule_refresh(bot, db, ev_id)
         await notify_join(bot, db, ev, cb.from_user.id)
+        await check_join_goal(bot, db, ev_id)
     if ev["invite_bonus"]:
         link = f"https://t.me/{ctx.bot_username}?start=ev_{ev_id}_{cb.from_user.id}"
         cnt = await db.val("SELECT COUNT(*) FROM event_invites i JOIN participants p ON p.event_id=i.event_id "

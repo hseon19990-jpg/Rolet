@@ -10,7 +10,7 @@ from aiogram.utils.keyboard import InlineKeyboardBuilder
 import ctx
 from i18n import t
 from handlers_user import fails_screen
-from services import (KIND_ICON, KIND_LABEL, audit, check_user, ensure_channel_link, event_text, notify_join, now, post_markup, post_text, refresh_post, schedule_refresh, is_manual,
+from services import (KIND_ICON, KIND_LABEL, audit, check_user, ensure_channel_link, event_text, notify_join, now, post_markup, post_text, refresh_post, schedule_refresh, is_manual, check_join_goal,
                       promo_markup, promo_text, restore_entry, return_markup)
 from ui import channel_url, home_kb, resolve_channel, show
 
@@ -117,12 +117,15 @@ async def advance(target, state: FSMContext):
         kb.button(text="♾ مفتوح (أنهيها بنفسي)", callback_data="d:0")
         return await target.answer("⏰ كم ساعة تستمر الفعالية؟\nأرسل <b>رقماً</b> (عدد الساعات) أو اضغط «مفتوح»:",
                                    reply_markup=kb.as_markup())
-    if d.get("kind") == "votes" and "goal" not in d:
+    if "goal" not in d:
         await state.set_state(New.goal)
         kb = InlineKeyboardBuilder()
         kb.button(text="♾ مفتوح (بدون عدد محدد)", callback_data="g:0")
-        return await target.answer("🗳 كم عدد أصوات الفائز؟\nتنتهي المسابقة عندما يصل أحد المتسابقين لهذا العدد.\n"
-                                   "أرسل <b>رقماً</b> أو اضغط «مفتوح»:", reply_markup=kb.as_markup())
+        if d.get("kind") == "votes":
+            q = ("🗳 كم عدد أصوات الفائز؟\nتنتهي المسابقة عندما يصل أحد المتسابقين لهذا العدد (أو بانتهاء الوقت، أيهما أسبق).\n")
+        else:
+            q = ("👥 كم عدد المنضمين المطلوب؟\nتنتهي الفعالية ويُسحب الفائز عند وصول المنضمين لهذا العدد (أو بانتهاء الوقت، أيهما أسبق).\n")
+        return await target.answer(q + "أرسل <b>رقماً</b> أو اضغط «مفتوح»:", reply_markup=kb.as_markup())
     if "draw_mode" not in d and not ctx.is_owner(state.key.user_id):
         await state.update_data(draw_mode="auto")   # غير المالك: سحب عشوائي دائماً
         d["draw_mode"] = "auto"
@@ -306,7 +309,7 @@ async def show_conditions(target, state, edit=None):
     await state.set_state(New.cond)
     lines = [f"📝 <b>{esc(d['title'])}</b>",
              f"{KIND_LABEL[d['kind']]} • 👑 {d['winners']} • ⏰ " + ("مفتوح" if d['hours'] > 24 * 365 else f"{d['hours']} ساعة")
-             + (f" • 🗳 {d['goal']} صوت" if d.get("goal") else ""), "",
+             + ((f" • 🗳 {d['goal']} صوت" if d["kind"] == "votes" else f" • 👥 {d['goal']} منضم") if d.get("goal") else ""), "",
              "📌 <b>الشروط الإضافية</b> (الاشتراك بقنوات المالك الإجبارية يُطبَّق تلقائياً):",
              f"💎 بريميوم: {'✅' if d.get('premium') else '❌'}",
              f"💬 تعليق: {'✅ (البوت مشرف بالقناة والمجموعة)' if d.get('comment_chat') else '❌'}",
@@ -539,13 +542,13 @@ async def publish(cb, state, bot):
         return await cb.message.answer("❌ البوت ليس مشرفاً في قناة النشر. اجعله مشرفاً فيها ثم انشر مرة ثانية.")
     eid = await db.insert(
         "INSERT INTO events(owner_id,kind,title,prize,winners,channel_id,created_at,end_at,need_premium,"
-        "comment_chat,comment_text,need_bot_url,invite_bonus,promo_text,min_members,max_channels,comment_url,vote_url,draw_mode,approve_mode,vote_goal) "
-        "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        "comment_chat,comment_text,need_bot_url,invite_bonus,promo_text,min_members,max_channels,comment_url,vote_url,draw_mode,approve_mode,vote_goal,join_goal) "
+        "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
         uid, d["kind"], d["title"], d.get("prize"), d["winners"], d.get("channel"), now(),
         now() + int(d["hours"] * 3600), int(bool(d.get("premium"))), d.get("comment_chat"),
         d.get("comment_text"), d.get("bot_url"), int(d.get("invite", 0) or 0), d.get("promo"),
         int(d.get("min_members", 0)), int(ctx.db.get("chroulette_max_channels")), d.get("comment_url"), d.get("vote_url"),
-        (d.get("draw_mode") or "auto") if ctx.is_owner(uid) else "auto", int(d.get("approve", 0)), int(d.get("goal", 0) or 0))
+        (d.get("draw_mode") or "auto") if ctx.is_owner(uid) else "auto", int(d.get("approve", 0)), (int(d.get("goal", 0) or 0) if d["kind"] == "votes" else 0), (int(d.get("goal", 0) or 0) if d["kind"] != "votes" else 0))
     for ch in d.get("extra", []):
         await db.run("INSERT OR IGNORE INTO event_channels(event_id,chat_id,title,username,url) VALUES(?,?,?,?,?)",
                      eid, ch["chat_id"], ch["title"], ch["username"], ch["url"])
@@ -906,6 +909,7 @@ async def entry_msg(m: Message, state: FSMContext, bot: Bot):
                  "VALUES(?,?,?,?,?,?,?)", ev["id"], chat.id, uid, chat.title, members, msg.message_id, now())
     await db.run("INSERT OR IGNORE INTO participants(event_id,user_id,joined_at) VALUES(?,?,?)", ev["id"], uid, now())
     schedule_refresh(bot, db, ev["id"])
+    await check_join_goal(bot, db, ev["id"])
     await state.clear()
     cnt = mine + 1
     await notify_join(bot, db, ev, uid, extra=f"\n📺 القناة: {esc(chat.title or '')} ({members} عضو) • فرصه الآن: {cnt}")

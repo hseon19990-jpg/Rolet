@@ -300,6 +300,8 @@ async def event_text(db, ev):
         lines.append(f"🎁 الجائزة: {esc(ev['prize'])}")
     lines.append(f"👑 عدد الفائزين: {ev['winners']}")
     lines.append(f"⏰ تنتهي: {fmt_time(ev['end_at'])}")
+    if ev["kind"] != "votes" and ev["join_goal"]:
+        lines.append(f"👥 تنتهي الفعالية عند وصول المنضمين إلى {ev['join_goal']}")
     if ev["kind"] == "votes" and ev["vote_goal"]:
         lines.append(f"🗳 تنتهي المسابقة عند وصول أحد المتسابقين إلى {ev['vote_goal']} صوت")
     if ev["kind"] == "chroulette":
@@ -391,6 +393,28 @@ async def refresh_post(bot, db, ev_id, force=False):
             if "not modified" not in str(e):
                 log.info("refresh_post failed: %s", e)
             return
+
+
+async def check_join_goal(bot, db, ev_id):
+    """عند بلوغ عدد المنضمين المطلوب تنتهي الفعالية (أو ينبَّه مالك البوت إن كانت يدوية)."""
+    ev = await db.one("SELECT * FROM events WHERE id=?", ev_id)
+    if not ev or ev["status"] != "active" or ev["kind"] == "votes" or not ev["join_goal"]:
+        return
+    n = await db.val("SELECT COUNT(*) FROM participants WHERE event_id=?", ev_id)
+    if n < ev["join_goal"]:
+        return
+    if is_manual(ev):
+        if await db.run("UPDATE events SET draw_notified=1 WHERE id=? AND draw_notified=0", ev_id):
+            from aiogram.utils.keyboard import InlineKeyboardBuilder
+            kb = InlineKeyboardBuilder()
+            kb.button(text="🎯 اختيار الفائز بنفسي", callback_data=f"evpick:{ev_id}")
+            kb.button(text="🎡 تدوير العجلة (عشوائي)", callback_data=f"evend:{ev_id}")
+            kb.adjust(1)
+            await safe_send(bot, ev["owner_id"],
+                            f"👥 وصل المنضمون إلى {ev['join_goal']} في «{esc(ev['title'])}» (#{ev_id}).\nاختر طريقة تحديد الفائز:",
+                            reply_markup=kb.as_markup())
+        return
+    await finish_event(bot, db, ev_id)
 
 
 _pending_refresh = {}
@@ -800,6 +824,7 @@ async def restore_entry(bot, db, ev_id, chat_id, uid):
             return True
         await db.tx(fn)
     schedule_refresh(bot, db, ev_id)
+    await check_join_goal(bot, db, ev_id)
     await audit(db, uid, "entry_restored", f"{ev_id}:{chat_id}")
     return True, "✅ أُعيدت الرسالة بقناتك وعدت للمسابقة."
 
