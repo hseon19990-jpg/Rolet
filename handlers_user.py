@@ -242,6 +242,8 @@ async def fails_screen(cb, ev, fails, retry_cb):
             lines.append(t(lang, "f_comment"))
             if ev["comment_url"]:
                 kb.button(text="💬 علق هنا", url=ev["comment_url"])
+            if ev["comment_text"] == "confirm" or not ev["comment_chat"]:
+                kb.button(text="✅ علّقت", callback_data=f"cconf:{ev['id']}")
             if ctx.is_admin(cb.from_user.id):
                 kb.button(text="👑 اعتماد يدوي (تعليق)", callback_data=f"aprv:{ev['id']}:comment")
         elif code == "botconfirm":
@@ -320,6 +322,14 @@ async def admin_approve(cb: CallbackQuery):
                      ev_id, cb.from_user.id, code)
     await audit(ctx.db, cb.from_user.id, "admin_approve", f"event={ev_id} code={code}")
     await cb.answer("✅ تم الاعتماد، اضغط «تحقق».", show_alert=True)
+
+
+@router.callback_query(F.data.startswith("cconf:"))
+async def cconf(cb: CallbackQuery):
+    """تأكيد التعليق بالزر (عندما لا يكون البوت مشرفاً بمجموعة التعليق)."""
+    await ctx.db.run("INSERT OR IGNORE INTO comment_hits(event_id,user_id) VALUES(?,?)",
+                     int(cb.data[6:]), cb.from_user.id)
+    await cb.answer("✅ اضغط «تحقق» للمتابعة.")
 
 
 @router.callback_query(F.data.startswith("vconf:"))

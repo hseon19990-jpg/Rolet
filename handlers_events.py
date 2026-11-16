@@ -312,7 +312,7 @@ async def show_conditions(target, state, edit=None):
              + ((f" • 🗳 {d['goal']} صوت" if d["kind"] == "votes" else f" • 👥 {d['goal']} منضم") if d.get("goal") else ""), "",
              "📌 <b>الشروط الإضافية</b> (الاشتراك بقنوات المالك الإجبارية يُطبَّق تلقائياً):",
              f"💎 بريميوم: {'✅' if d.get('premium') else '❌'}",
-             f"💬 تعليق: {'✅ (البوت مشرف بالقناة والمجموعة)' if d.get('comment_chat') else '❌'}",
+             f"💬 تعليق: {'✅' if (d.get('comment_chat') or d.get('comment_url')) else '❌'}",
              f"🤖 تفعيل بوت: {'✅' if d.get('bot_url') else '❌'}",
              f"🗳 تصويت (رابط التعليق): {'✅' if d.get('vote_url') else '❌'}",
              f"📢 قنوات إضافية: {len(d.get('extra', []))}"]
@@ -353,7 +353,7 @@ async def cb_cond(cb: CallbackQuery, state: FSMContext, bot: Bot):
         await cb.answer("✅")
         return await show_conditions(cb.message, state)
     if act == "com":
-        if d.get("comment_chat"):   # الضغط مرة ثانية = إلغاء الشرط
+        if d.get("comment_chat") or d.get("comment_url"):   # الضغط مرة ثانية = إلغاء الشرط
             await state.update_data(comment_text=None, comment_chat=None, comment_url=None)
             await cb.answer("تم إلغاء شرط التعليق.")
             return await show_conditions(cb.message, state)
@@ -368,8 +368,8 @@ async def cb_cond(cb: CallbackQuery, state: FSMContext, bot: Bot):
             "أرسل <b>رابط القناة</b> أو <b>رابط منشور منها</b> أو رابط الجروب:\n"
             "• https://t.me/اسم_القناة أو https://t.me/اسم_القناة/123\n"
             "• أو @يوزر / ايدي / منشور محوّل\n\n"
-            "القناة لازم تكون مربوطة بمجموعة نقاش (التعليقات).\n"
-            "⚠️ <b>لازم البوت يكون مشرفاً في القناة وفي مجموعة النقاش</b>.",
+            "أي شكل مقبول، حتى لو البوت مو مشرف.\n"
+            "💡 إذا كان البوت مشرفاً بمجموعة النقاش يُحتسب التعليق تلقائياً، وإلا يضغط المشارك «علّقت».",
             reply_markup=kb.as_markup())
     if act == "bot":
         await state.update_data(ask="bot")
@@ -450,40 +450,42 @@ async def resolve_group(m, bot):
         try:
             chat = await bot.get_chat(ref)
         except Exception:
-            return None, None, "❌ لم أجد القناة/الجروب. تأكد من الرابط وأن البوت مضاف فيه."
-    channel = None
-    if chat.type == "channel":
-        channel = chat
-        if not await _bot_is_admin(bot, chat.id):
-            return None, None, ("❌ البوت <b>ليس مشرفاً</b> في هذي القناة.\n"
-                                "اجعله مشرفاً فيها ثم أعد إرسال الرابط.")
-        try:
-            full = await bot.get_chat(chat.id)
-            linked = full.linked_chat_id
-            group = await bot.get_chat(linked) if linked else None
-        except Exception:
-            group = None
-        if not group:
-            return None, None, ("❌ هذي القناة ما لها مجموعة نقاش (تعليقات) مرتبطة، أو البوت ما يقدر يوصلها.\n"
-                                "اربط القناة بمجموعة نقاش وأضف البوت مشرفاً فيها.")
-    elif chat.type in ("group", "supergroup"):
-        group = chat
-    else:
-        return None, None, "❌ أرسل رابط قناة أو جروب."
-    if not await _bot_is_admin(bot, group.id):
-        return None, None, ("❌ البوت <b>ليس مشرفاً</b> في مجموعة التعليقات "
-                            f"«{esc(group.title or '')}».\n"
-                            "اجعله مشرفاً فيها (لازم حتى يحتسب تعليقات المشاركين) ثم أعد إرسال الرابط.")
-    url = post_link or await channel_url(bot, channel or group)
-    return group, url, None
+            chat = None   # نقبلها حتى لو ما قدر البوت يوصلها
+            if isinstance(ref, str) and not post_link:
+                post_link = "https://t.me/" + ref[1:]
+    # نقبل القناة/الجروب بأي حال، وإن كان البوت مشرفاً بمجموعة التعليقات يُحتسب التعليق تلقائياً
+    channel, group = None, None
+    if chat is not None:
+        if chat.type == "channel":
+            channel = chat
+            try:
+                linked = (await bot.get_chat(chat.id)).linked_chat_id
+                group = await bot.get_chat(linked) if linked else None
+            except Exception:
+                group = None
+        elif chat.type in ("group", "supergroup"):
+            group = chat
+    auto = bool(group) and await _bot_is_admin(bot, group.id)
+    url = post_link
+    if not url and (channel or group):
+        url = await channel_url(bot, channel or group)
+    if not url:
+        return None, None, "❌ ما قدرت أحصل على رابط من هذا. أرسل رابط القناة أو منشور منها أو @يوزرها."
+    return (group if auto else None), url, None
 
 
 async def set_comment_group(target, state, bot, chat, url=None):
-    url = url or await channel_url(bot, chat)
-    await state.update_data(comment_chat=chat.id, comment_url=url, comment_text=None, ask=None)
+    """chat = مجموعة التعليق إن كان البوت مشرفاً فيها (احتساب تلقائي)، وإلا None (تأكيد بزر «علّقت»)."""
+    await state.update_data(comment_chat=chat.id if chat else None, comment_url=url,
+                            comment_text=None if chat else "confirm", ask=None)
     await state.set_state(New.cond)
-    await target.answer(f"✅ تم اعتماد التعليق على «{esc(chat.title or '')}» (البوت مشرف).\n"
-                        "سيظهر شرط التعليق بالفعالية بكلمة «علق هنا» كرابط.")
+    if chat:
+        await target.answer(f"✅ تم اعتماد التعليق على «{esc(chat.title or '')}» (البوت مشرف، يُحتسب تلقائياً).\n"
+                            "سيظهر شرط التعليق بالفعالية بكلمة «علق هنا» كرابط.")
+    else:
+        await target.answer("✅ تم اعتماد شرط التعليق.\n"
+                            "البوت ليس مشرفاً بمجموعة التعليق، لذلك يضغط المشارك زر «علّقت» للتأكيد. "
+                            "(إن جعلت البوت مشرفاً فيها يُحتسب التعليق تلقائياً.)")
     await show_conditions(target, state)
 
 
@@ -527,15 +529,6 @@ async def publish(cb, state, bot):
     db = ctx.db
     d = await state.get_data()
     uid = cb.from_user.id
-    if d.get("comment_chat"):   # تأكد أن البوت ما زال مشرفاً بكروب التعليق
-        try:
-            me = await bot.get_chat_member(d["comment_chat"], bot.id)
-            ok = me.status == "administrator"
-        except Exception:
-            ok = False
-        if not ok:
-            return await cb.message.answer("❌ البوت لم يعد مشرفاً في مجموعة التعليقات. اجعله مشرفاً فيها ثم انشر مرة ثانية "
-                                           "(أو ألغِ شرط التعليق).")
     if not d.get("channel"):
         return await cb.message.answer("❌ لازم تختار قناة للنشر.")
     if not await _bot_is_admin(bot, d["channel"]):

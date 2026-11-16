@@ -268,7 +268,7 @@ async def check_user(bot, db, ev, user_id):
             fails.append(("channel", ch))
     if ev["need_premium"] and not u["is_premium"] and not await approved("premium"):
         fails.append(("premium", None))
-    if ev["comment_chat"] and not await db.val(
+    if (ev["comment_chat"] or ev["comment_url"]) and not await db.val(
             "SELECT 1 FROM comment_hits WHERE event_id=? AND user_id=?", ev["id"], user_id) \
             and not await approved("comment"):
         fails.append(("comment", ev["comment_url"]))
@@ -315,7 +315,7 @@ async def event_text(db, ev):
     conds = [f"• الاشتراك بـ {esc(ch['title'] or '')}" for ch in await mandatory_list(db, ev)]
     if ev["need_premium"]:
         conds.append("• حساب تليجرام بريميوم")
-    if ev["comment_chat"]:
+    if ev["comment_chat"] or ev["comment_url"]:
         here = f'<a href="{ev["comment_url"]}">علق هنا</a>' if ev["comment_url"] else "علق هنا"
         conds.append(f"• 💬 التعليق: {here}")
     if ev["need_bot_url"]:
@@ -647,7 +647,7 @@ async def check_channels(bot, db):
             await safe_send(bot, ch["owner_id"], f"⚠️ البوت لم يعد مشرفاً في «{esc(ch['title'] or '')}». "
                                                  f"تم إخفاء القناة من الأقسام حتى تعيد إضافتي كمشرف.")
     for ev in await db.all("SELECT id,owner_id,title,comment_chat FROM events "
-                           "WHERE status='active' AND comment_chat IS NOT NULL"):
+                           "WHERE status='active' AND comment_chat IS NOT NULL AND COALESCE(comment_text,'')!='confirm'"):
         try:
             me = await bot.get_chat_member(ev["comment_chat"], bot.id)
             ok = me.status == "administrator"
