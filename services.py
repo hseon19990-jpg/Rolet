@@ -308,11 +308,13 @@ async def event_text(db, ev):
     if ev["kind"] == "votes" and ev["vote_goal"]:
         lines.append(f"🗳 تنتهي المسابقة عند وصول أحد المتسابقين إلى {ev['vote_goal']} صوت")
     if ev["kind"] == "chroulette":
-        lines.append("\n🌐 <b>للمشرفين وملاك القنوات فقط</b>\nيُنشر إعلان الفعالية بقناتك وتدخل السحب، وكل قناة تزيد فرصك.")
-        lines.append(f"🎟 أقصى عدد قنوات: {ev['max_channels']}")
-        if ev["min_members"]:
-            lines.append(f"👥 أقل عدد أعضاء بالقناة: {ev['min_members']}")
-        lines.append("🚫 مشرفو قناة الروليت لا يشاركون.")
+        lines.append("\n🌐 <b>إمكانية مشاركة مشرفين ومالك القناة</b>")
+        lines.append("\n📋 <b>الشروط:</b>\n"
+                     "• يجب رفع البوت مشرفاً في قناتك\n"
+                     "• يجب فتح صلاحية الإرسال للبوت")
+        lines.append("\n🔁 بعد أن ينشر البوت الرسالة في قناتك: لو حذفها العضو سيأتيه إشعار بإزالته من الروليت، "
+                     "ويجب عليه ضغط زر «إعادة الإرسال» الذي سيأتيه في المحادثة، "
+                     "أو يقوم البوت تلقائياً بإعادة الإرسال بعد 3 دقائق.")
     elif ev["invite_bonus"]:
         lines.append(f"🎟 ادعُ أصدقاءك: كل صديق = فرصة إضافية (حتى {ev['invite_bonus']})")
     conds = [f"• الاشتراك بـ {esc(ch['title'] or '')}" for ch in await mandatory_list(db, ev)]
@@ -717,7 +719,7 @@ async def notify_join(bot, db, ev, uid, extra=""):
 
 
 # ───────────── رولت القنوات: مراقبة حذف رسالة الفعالية من قنوات المشاركين ─────────────
-REPOST_DELAY = 300      # بعد كم ثانية من الحذف يعيد البوت نشر الرسالة تلقائياً
+REPOST_DELAY = 180      # بعد كم ثانية من الحذف يعيد البوت نشر الرسالة تلقائياً
 WATCH_EVERY = 60        # كل كم ثانية يفحص البوت وجود الرسائل
 _entry_lock = asyncio.Lock()
 
@@ -791,7 +793,7 @@ async def remove_entry(bot, db, e):
         f"⚠️ <b>حُذفت رسالة الفعالية</b> «{esc(ev['title'] if ev else '')}» من قناتك «{esc(e['title'] or '')}»، "
         f"لذلك <b>أُزيلت مشاركتك</b> من الفعالية.\n\n"
         f"للعودة للمسابقة أعد إرسال الرسالة بالضغط على «↩️ إرجاع».\n"
-        f"⏳ وإذا بقي البوت مشرفاً بصلاحية النشر سيعيد نشر الرسالة بالقناة تلقائياً بعد 5 دقائق "
+        f"⏳ وإذا بقي البوت مشرفاً بصلاحية النشر سيعيد نشر الرسالة بالقناة تلقائياً بعد 3 دقائق "
         f"(وتبقى بحاجة لزر «إرجاع» ليعود اسمك للمسابقة).",
         reply_markup=return_markup(e["event_id"], e["chat_id"]))
     return True
@@ -843,7 +845,7 @@ async def restore_entry(bot, db, ev_id, chat_id, uid):
 
 
 async def repost_removed(bot, db):
-    """بعد 5 دقائق من الحذف: إعادة نشر الرسالة بالقناة تلقائياً إن بقي البوت مشرفاً بصلاحية النشر."""
+    """بعد 3 دقائق من الحذف: إعادة نشر الرسالة بالقناة تلقائياً إن بقي البوت مشرفاً بصلاحية النشر."""
     for rem in await db.all("SELECT * FROM entry_removals WHERE repost_msg_id IS NULL AND removed_at<=?",
                             now() - REPOST_DELAY):
         async with _entry_lock:
