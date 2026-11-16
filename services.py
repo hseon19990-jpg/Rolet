@@ -309,15 +309,12 @@ async def event_text(db, ev):
         lines.append(f"🗳 تنتهي المسابقة عند وصول أحد المتسابقين إلى {ev['vote_goal']} صوت")
     if ev["kind"] == "chroulette":
         lines.append("\n🌐 <b>إمكانية مشاركة مشرفين ومالك القناة</b>")
-        lines.append("\n📋 <b>الشروط:</b>\n"
-                     "• يجب رفع البوت مشرفاً في قناتك\n"
-                     "• يجب فتح صلاحية الإرسال للبوت")
-        lines.append("\n🔁 بعد أن ينشر البوت الرسالة في قناتك: لو حذفها العضو سيأتيه إشعار بإزالته من الروليت، "
-                     "ويجب عليه ضغط زر «إعادة الإرسال» الذي سيأتيه في المحادثة، "
-                     "أو يقوم البوت تلقائياً بإعادة الإرسال بعد 3 دقائق.")
     elif ev["invite_bonus"]:
         lines.append(f"🎟 ادعُ أصدقاءك: كل صديق = فرصة إضافية (حتى {ev['invite_bonus']})")
-    conds = [f"• الاشتراك بـ {esc(ch['title'] or '')}" for ch in await mandatory_list(db, ev)]
+    conds = []
+    if ev["kind"] == "chroulette":
+        conds += ["• يجب رفع البوت مشرفاً في قناتك", "• يجب فتح صلاحية الإرسال للبوت"]
+    conds += [f"• الاشتراك بـ {esc(ch['title'] or '')}" for ch in await mandatory_list(db, ev)]
     if ev["need_premium"]:
         conds.append("• حساب تليجرام بريميوم")
     if ev["comment_chat"] or ev["comment_url"]:
@@ -738,7 +735,7 @@ def promo_markup(ev_id):
 def return_markup(ev_id, chat_id):
     from aiogram.utils.keyboard import InlineKeyboardBuilder
     kb = InlineKeyboardBuilder()
-    kb.button(text="↩️ إرجاع", callback_data=f"cret:{ev_id}:{chat_id}")
+    kb.button(text="🔄 إعادة الإرسال", callback_data=f"cret:{ev_id}:{chat_id}")
     return kb.as_markup()
 
 
@@ -792,9 +789,9 @@ async def remove_entry(bot, db, e):
         bot, e["user_id"],
         f"⚠️ <b>حُذفت رسالة الفعالية</b> «{esc(ev['title'] if ev else '')}» من قناتك «{esc(e['title'] or '')}»، "
         f"لذلك <b>أُزيلت مشاركتك</b> من الفعالية.\n\n"
-        f"للعودة للمسابقة أعد إرسال الرسالة بالضغط على «↩️ إرجاع».\n"
-        f"⏳ وإذا بقي البوت مشرفاً بصلاحية النشر سيعيد نشر الرسالة بالقناة تلقائياً بعد 3 دقائق "
-        f"(وتبقى بحاجة لزر «إرجاع» ليعود اسمك للمسابقة).",
+        f"للعودة للروليت اضغط زر «🔄 إعادة الإرسال» بالأسفل.\n"
+        f"⏳ أو يعيد البوت إرسال الرسالة في قناتك تلقائياً بعد 3 دقائق (بشرط أن يبقى مشرفاً بصلاحية النشر)، "
+        f"وبعدها اضغط الزر ليعود اسمك للمسابقة.",
         reply_markup=return_markup(e["event_id"], e["chat_id"]))
     return True
 
@@ -868,7 +865,7 @@ async def repost_removed(bot, db):
         if mid:
             await safe_send(bot, rem["user_id"],
                             f"📣 أعاد البوت نشر رسالة الفعالية «{esc(ev['title'])}» بقناتك «{esc(rem['title'] or '')}».\n"
-                            f"لتعود للمسابقة اضغط «↩️ إرجاع» (ولا تحذف الرسالة مرة ثانية).",
+                            f"لتعود للمسابقة اضغط «🔄 إعادة الإرسال» (ولا تحذف الرسالة مرة ثانية).",
                             reply_markup=return_markup(rem["event_id"], rem["chat_id"]))
         await asyncio.sleep(0.05)
 

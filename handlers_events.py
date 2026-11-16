@@ -1063,7 +1063,7 @@ async def cmine(cb: CallbackQuery):
     if gone:
         txt += "\n\n⚠️ قنوات حُذفت رسالتها (أُزيلت من المسابقة):\n" + "\n".join(f"• {esc(g['title'] or '')}" for g in gone)
         for g in gone:
-            kb.button(text=f"↩️ إرجاع «{(g['title'] or '')[:25]}»", callback_data=f"cret:{ev_id}:{g['chat_id']}")
+            kb.button(text=f"🔄 إعادة الإرسال «{(g['title'] or '')[:25]}»", callback_data=f"cret:{ev_id}:{g['chat_id']}")
         kb.adjust(1)
     await cb.message.answer(txt, reply_markup=kb.as_markup() if gone else None)
     await cb.answer()
