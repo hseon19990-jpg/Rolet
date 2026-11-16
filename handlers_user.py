@@ -16,7 +16,7 @@ from config import OWNER_IDS
 from i18n import t
 from services import (KIND_ICON, check_spike, check_user, clear_gate, event_text, gate_missing, mention, notify_join,
                       now, owner_links, refresh_post, schedule_refresh, owner_quality, record_referral, finish_event, check_join_goal, resolve_source, retention_sample, safe_send,
-                      top_channels, create_payout, ensure_default_link, audit)
+                      top_channels, create_payout, ensure_default_link, audit, points_balance, request_withdraw, decide_withdraw, withdraw_amounts)
 from ui import gate_screen, home_kb, menu_kb, show
 
 router = Router()
@@ -44,7 +44,9 @@ async def cmd_start(m: Message, command: CommandObject, bot: Bot):
     if is_new and payload:   # أول تفعيل للبوت فقط: يُحتسب لصاحب الرابط ولا يتغير بعدها
         src = await resolve_source(db, payload)
         if src:
-            await record_referral(db, u.id, src)
+            # رابط إحالة (ref_) + ميزة ستارت مفعّلة: لا تُحتسب حتى يكمل المحال إحالته ببوت ستارت
+            need = payload.startswith("ref_") and bool(db.get("strat_link"))
+            await record_referral(db, u.id, src, need_strat=need)
     await db.run("UPDATE users SET payload=? WHERE user_id=?", payload, u.id)
     await gate(m, u.id, bot)
 
@@ -140,7 +142,104 @@ async def cap(cb: CallbackQuery, bot: Bot):
         await send_captcha(cb.message, uid, user["lang"])
 
 
+async def strat_step(target, uid, lang):
+    """يعرض رابط ستارت للمحال الجديد الذي دخل برابط إحالة ولم يُؤكد بعد. يرجع True إذا عُرض."""
+    db = ctx.db
+    link = db.get("strat_link")
+    if not link:
+        return False
+    pending = await db.val("SELECT 1 FROM referrals WHERE user_id=? AND strat_ok=0", uid)
+    if not pending:
+        return False
+    kb = InlineKeyboardBuilder()
+    kb.button(text="🚀 فعّل البوت الثاني", url=link)
+    kb.button(text="🔄 تحقق", callback_data="strat:chk")
+    kb.adjust(1)
+    await target.answer(
+        "🔗 <b>خطوة أخيرة لتُحتسب إحالة صديقك</b>\n\n"
+        "اضغط الزر وفعّل البوت الثاني، وأكمل خطواته (الاشتراك في قنواته والتحقق).\n"
+        "ما تُحتسب الإحالة لمن دعاك إلا بعد ما تُكمل هذي الخطوات هناك.\n\n"
+        "وبعد الإكمال يصلك تأكيد هنا تلقائياً.", reply_markup=kb.as_markup())
+    return True
+
+
+@router.callback_query(F.data == "strat:chk")
+async def strat_chk(cb: CallbackQuery):
+    done = await ctx.db.val("SELECT 1 FROM referrals WHERE user_id=? AND strat_ok=0", cb.from_user.id)
+    if done:
+        return await cb.answer("لم يصلني تأكيد بعد. أكمل خطوات البوت الثاني ثم اضغط تحقق.", show_alert=True)
+    await cb.answer("✅ أنت جاهز")
+    lang = await lang_of(cb.from_user.id)
+    await cb.message.answer(t(lang, "welcome"), reply_markup=menu_kb(lang, ctx.is_admin(cb.from_user.id)))
+
+
+@router.callback_query(F.data == "m:wd")
+async def m_wd(cb: CallbackQuery):
+    await wd_screen(cb)
+    await cb.answer()
+
+
+async def wd_screen(cb: CallbackQuery):
+    db, uid = ctx.db, cb.from_user.id
+    lang = await lang_of(uid)
+    bal, earned, used = await points_balance(db, uid)
+    kb = InlineKeyboardBuilder()
+    for a in withdraw_amounts(db):
+        kb.button(text=f"{'⭐' if bal >= a else '🔒'} سحب {a} نجمة", callback_data=f"wd:ask:{a}")
+    kb.button(text=t(lang, "btn_home"), callback_data="m:home")
+    kb.adjust(2)
+    await show(cb, f"💸 <b>السحب</b>\n\n⭐ رصيدك: <b>{bal}</b> نقطة (النجمة = نقطة)\n"
+                   f"📥 المكتسب من الإحالات المؤكدة: {earned} • المسحوب/قيد السحب: {used}\n\n"
+                   "اختر عدد النجوم التي تريد سحبها، وتُخصم نقاطك عند الطلب.\n"
+                   "النجوم تُهدى لك إهداءً رسمياً من تيليجرام وليست مجرد هدية رمزية.", kb.as_markup())
+
+
+@router.callback_query(F.data.startswith("wd:ask:"))
+async def wd_ask(cb: CallbackQuery, bot: Bot):
+    db, uid = ctx.db, cb.from_user.id
+    res = await request_withdraw(db, uid, int(cb.data.split(":")[2]))
+    if res == "bad":
+        return await cb.answer("مبلغ غير متاح", show_alert=True)
+    if res == "exists":
+        return await cb.answer("لديك طلب سحب قيد المراجعة.", show_alert=True)
+    if res == "low":
+        return await cb.answer("رصيدك لا يكفي لهذا المبلغ.", show_alert=True)
+    await cb.answer(f"✅ تم طلب سحب {res['stars']} نجمة", show_alert=True)
+    u = await db.one("SELECT user_id,username,first_name FROM users WHERE user_id=?", uid)
+    kb = InlineKeyboardBuilder()
+    kb.button(text="✅ تم إرسال النجوم", callback_data=f"wd:sent:{res['id']}")
+    kb.button(text="❌ رفض", callback_data=f"wd:rej:{res['id']}")
+    kb.adjust(2)
+    for oid in set(OWNER_IDS):
+        await safe_send(bot, oid, f"💸 طلب سحب #{res['id']}\nالعضو: {mention(u)} ({uid})\n"
+                                  f"المبلغ: {res['stars']} نجمة • المتبقي له: {res['left']} نقطة", reply_markup=kb.as_markup())
+    await audit(db, uid, "withdraw_request", res["id"])
+    await wd_screen(cb)
+
+
+@router.callback_query(F.data.startswith("wd:sent:") | F.data.startswith("wd:rej:"))
+async def wd_decide(cb: CallbackQuery, bot: Bot):
+    if not ctx.is_owner(cb.from_user.id):
+        return await cb.answer()
+    _, action, wid = cb.data.split(":")
+    w = await decide_withdraw(ctx.db, int(wid), "sent" if action == "sent" else "rej")
+    if not w:
+        return await cb.answer("تمت معالجته", show_alert=True)
+    await audit(ctx.db, cb.from_user.id, f"withdraw_{w['status']}", wid)
+    if w["status"] == "sent":
+        await safe_send(bot, w["user_id"], f"🎁 تم إرسال {w['stars']} نجمة ⭐ كإهداء رسمي. مبروك!")
+    else:
+        await safe_send(bot, w["user_id"], f"❌ رُفض طلب سحب {w['stars']} نجمة، وأُعيدت نقاطك لرصيدك.")
+    await cb.answer("✅")
+    try:
+        await cb.message.edit_reply_markup(reply_markup=None)
+    except Exception:
+        pass
+
+
 async def route(target, uid, lang, payload):
+    if payload.startswith("ref_") and await strat_step(target, uid, lang):
+        return
     try:
         if payload.startswith("ev_"):
             parts = payload.split("_")
@@ -714,13 +813,12 @@ async def m_links(cb: CallbackQuery):
         name = "الرابط العام" if l["is_default"] else (l["ch_title"] or l["title"] or "قناة")
         url = f"https://t.me/{ctx.bot_username}?start=ref_{l['code']}"
         lines.append(f"<b>{esc(name)}</b>\n{url}\n"
-                     f"✅ معتمد: {l['valid']}/{l['thr']} • ⏳ بالانتظار: {l['pending']} • 💵 {l['prc']}$ لكل {l['thr']}\n")
+                     f"✅ معتمد: {l['valid']} • ⏳ بالانتظار: {l['pending']}\n")
     lines.append("كل من يفعّل البوت لأول مرة عبر رابطك يُحتسب لك مرة وحدة فقط.")
-    paid = await db.val("SELECT COALESCE(SUM(amount),0) FROM payouts WHERE owner_id=? AND status='paid'", uid)
-    pend = await db.val("SELECT COALESCE(SUM(amount),0) FROM payouts WHERE owner_id=? AND status IN ('pending','approved')", uid)
-    lines.append(f"\n💰 مدفوع: {paid}$ • قيد المراجعة: {pend}$")
+    bal, _, _ = await points_balance(db, uid)
+    lines.append(f"\n⭐ رصيدك: {bal} نقطة (كل إحالة مؤكدة = نقطة، والنجمة = نقطة)")
     kb = InlineKeyboardBuilder()
-    kb.button(text="💰 اطلب الصرف", callback_data="pay:req")
+    kb.button(text="💸 السحب", callback_data="m:wd")
     kb.button(text=t(lang, "btn_home"), callback_data="m:home")
     kb.adjust(1)
     await show(cb, "\n".join(lines), kb.as_markup())

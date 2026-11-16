@@ -36,6 +36,10 @@ class AddMand(StatesGroup):
     wait = State()
 
 
+class OwnerCfg(StatesGroup):
+    wait = State()
+
+
 def owner_only(uid):
     return ctx.is_owner(uid)
 
@@ -367,8 +371,63 @@ async def adm_rep(cb: CallbackQuery):
 async def adm_set(cb: CallbackQuery):
     lines = ["⚙️ <b>الإعدادات</b> (للتعديل: /set المفتاح القيمة)\n"]
     lines += [f"<code>{k}</code> = {ctx.db.get(k)}" for k in EDITABLE]
-    await show(cb, "\n".join(lines), back_kb())
+    kb = InlineKeyboardBuilder()
+    if owner_only(cb.from_user.id):
+        kb.button(text="🔗 رابط البوت الثاني (ستارت)", callback_data="cfg:strat_link")
+        kb.button(text="⭐ نقاط كل إحالة", callback_data="cfg:points_per_ref")
+        kb.button(text="🔑 سر الربط مع ستارت", callback_data="cfg:strat_secret")
+    kb.button(text="⬅️", callback_data="adm:home")
+    kb.adjust(1)
+    await show(cb, "\n".join(lines), kb.as_markup())
     await cb.answer()
+
+
+_CFG_ASK = {
+    "strat_link": "🔗 أرسل رابط إحالة حسابك الثاني في بوت ستارت (مثال: https://t.me/البوت?start=...).\nأرسل - لإيقاف الميزة.",
+    "strat_secret": "🔑 أرسل سراً (نصاً طويلاً بلا مسافات) لربط روليت بستارت. استخدم نفس السر في أمر ستارت /rolet_link.",
+    "points_per_ref": "⭐ أرسل عدد النقاط التي يستلمها المحيل عن كل إحالة مؤكدة (رقم صحيح، مثلاً 1).\nالنجمة = نقطة دائماً.",
+}
+
+
+@router.callback_query(F.data.startswith("cfg:"))
+async def cfg_start(cb: CallbackQuery, state: FSMContext):
+    key = cb.data[4:]
+    if not owner_only(cb.from_user.id) or key not in _CFG_ASK:
+        return await cb.answer()
+    await state.clear()
+    await state.set_state(OwnerCfg.wait)
+    await state.update_data(cfg_key=key)
+    await cb.message.answer(f"{_CFG_ASK[key]}\n\nالقيمة الحالية: {('مضبوط' if ctx.db.get(key) else '—') if key == 'strat_secret' else (ctx.db.get(key) or '—')}\n/cancel للإلغاء")
+    await cb.answer()
+
+
+@router.message(StateFilter(OwnerCfg.wait), F.text, ~F.text.startswith("/"))
+async def cfg_save(m: Message, state: FSMContext):
+    key = (await state.get_data()).get("cfg_key")
+    val = m.text.strip()
+    if not owner_only(m.from_user.id) or key not in _CFG_ASK:
+        return await state.clear()
+    if key == "strat_link":
+        if val == "-":
+            val = ""
+        elif not (val.startswith("https://t.me/") or val.startswith("http://t.me/")):
+            return await m.answer("❌ لازم يكون رابط يبدأ بـ https://t.me/ . جرّب مرة ثانية.")
+    elif key == "strat_secret":
+        if len(val) < 8 or " " in val:
+            return await m.answer("❌ السر لازم 8 أحرف على الأقل وبلا مسافات.")
+    else:
+        if not val.isdigit() or int(val) < 1:
+            return await m.answer("❌ أرسل رقماً صحيحاً أكبر من صفر.")
+    await ctx.db.set(key, val)
+    await audit(ctx.db, m.from_user.id, "set", f"{key}={val}")
+    await state.clear()
+    if key == "strat_secret":
+        try:
+            await m.delete()
+        except Exception:
+            pass
+        return await m.answer("✅ تم حفظ السر (حذفت رسالتك لأنها تحتوي السر).")
+    await m.answer(f"✅ تم الحفظ: {key} = {val or 'مطفأ'}")
 
 
 @router.message(Command("set"))

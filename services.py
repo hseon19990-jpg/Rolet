@@ -84,15 +84,73 @@ async def resolve_source(db, payload):
     return None
 
 
-async def record_referral(db, user_id, src):
-    """يسجل الإحالة مرة وحدة فقط لكل مستخدم (user_id مفتاح أساسي) ويمنع الإحالة الذاتية."""
+async def record_referral(db, user_id, src, need_strat=False):
+    """يسجل الإحالة مرة وحدة فقط لكل مستخدم (user_id مفتاح أساسي) ويمنع الإحالة الذاتية.
+    need_strat=True: لا تُحتسب حتى يكمل المحال إحالته ببوت ستارت (strat_ok=0 إلى حين التأكيد)."""
     owner, code, source, sid = src
     if owner == user_id:
         return False
     n = await db.run(
-        "INSERT OR IGNORE INTO referrals(user_id,owner_id,link_code,source,source_id,created_at) VALUES(?,?,?,?,?,?)",
-        user_id, owner, code, source, sid, now())
+        "INSERT OR IGNORE INTO referrals(user_id,owner_id,link_code,source,source_id,created_at,strat_ok) VALUES(?,?,?,?,?,?,?)",
+        user_id, owner, code, source, sid, now(), 0 if need_strat else 1)
     return n == 1
+
+
+async def confirm_strat(bot, db, user_id):
+    """يُستدعى عند وصول تأكيد من ستارت أن المحال أكمل الإحالة هناك. يرجع True إذا تغيّر شي."""
+    n = await db.run("UPDATE referrals SET strat_ok=1 WHERE user_id=? AND strat_ok=0", user_id)
+    if n:
+        await safe_send(bot, user_id, "✅ تم تأكيد إكمالك للإحالة في البوت الثاني. شكراً لك!")
+    return bool(n)
+
+
+def withdraw_amounts(db):
+    out = []
+    for x in (db.get("withdraw_amounts") or "").replace(" ", "").split(","):
+        if x.isdigit() and int(x) > 0:
+            out.append(int(x))
+    return sorted(set(out))
+
+
+def _balance(c, uid, per):
+    earned = c.execute("SELECT COUNT(*) FROM referrals WHERE owner_id=? AND status='valid' AND strat_ok=1", (uid,)).fetchone()[0]
+    used = c.execute("SELECT COALESCE(SUM(stars),0) FROM star_withdrawals WHERE user_id=? AND status IN ('pending','sent')",
+                     (uid,)).fetchone()[0]
+    return earned * per, used
+
+
+async def points_balance(db, uid):
+    """يرجع (المتاح, المكتسب, المسحوب/قيد السحب). النجمة = نقطة، والنقاط من الإحالات المؤكدة."""
+    per = max(1, int(float(db.get("points_per_ref") or 1)))
+    earned, used = await db.tx(lambda c: _balance(c, uid, per))
+    return earned - used, earned, used
+
+
+async def request_withdraw(db, uid, stars):
+    """يخصم النقاط بإنشاء طلب سحب. يرجع dict أو \"bad\" (مبلغ غير مسموح) أو \"low\" (رصيد غير كافٍ) أو \"exists\"."""
+    if stars not in withdraw_amounts(db):
+        return "bad"
+    per = max(1, int(float(db.get("points_per_ref") or 1)))
+
+    def fn(c):
+        if c.execute("SELECT 1 FROM star_withdrawals WHERE user_id=? AND status='pending'", (uid,)).fetchone():
+            return "exists"
+        earned, used = _balance(c, uid, per)
+        if earned - used < stars:
+            return "low"
+        wid = c.execute("INSERT INTO star_withdrawals(user_id,stars,created_at) VALUES(?,?,?)", (uid, stars, now())).lastrowid
+        return {"id": wid, "stars": stars, "left": earned - used - stars}
+
+    return await db.tx(fn)
+
+
+async def decide_withdraw(db, wid, action):
+    w = await db.one("SELECT * FROM star_withdrawals WHERE id=?", wid)
+    if not w or w["status"] != "pending":
+        return None
+    new = "sent" if action == "sent" else "rejected"   # الرفض يرجّع النقاط تلقائياً (لا تُحسب ضمن المسحوب)
+    await db.run("UPDATE star_withdrawals SET status=?, decided_at=? WHERE id=?", new, now(), wid)
+    return {**w, "status": new}
 
 
 async def validate_referrals(db, bot=None):
@@ -106,7 +164,7 @@ async def validate_referrals(db, bot=None):
         await db.run("UPDATE referrals SET status='invalid' WHERE status='pending' AND created_at<=? AND user_id IN "
                      "(SELECT user_id FROM users WHERE verified=0)", cutoff)
     ready = [r["user_id"] for r in await db.all(
-        "SELECT r.user_id FROM referrals r JOIN users u ON u.user_id=r.user_id WHERE r.status='pending' "
+        "SELECT r.user_id FROM referrals r JOIN users u ON u.user_id=r.user_id WHERE r.status='pending' AND r.strat_ok=1 "
         "AND r.created_at<=? AND (u.verified=1 OR ?=0) AND u.banned=0 AND u.blocked_bot=0 ORDER BY r.created_at LIMIT 300",
         cutoff, 1 if need_captcha else 0)]
     if not ready:

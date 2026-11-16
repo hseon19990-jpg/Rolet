@@ -6,7 +6,7 @@ from i18n import t
 def menu_kb(lang, admin=False):
     kb = InlineKeyboardBuilder()
     for key, cb in (("btn_new", "m:new"), ("btn_events", "m:events"), ("btn_channels", "m:channels"),
-                    ("btn_links", "m:links"), ("btn_dir", "m:dir"), ("btn_me", "m:me"), ("btn_share", "m:share"),
+                    ("btn_links", "m:links"), ("btn_wd", "m:wd"), ("btn_dir", "m:dir"), ("btn_me", "m:me"), ("btn_share", "m:share"),
                     ("btn_rules", "m:rules"), ("btn_lang", "m:lang")):
         kb.button(text=t(lang, key), callback_data=cb)
     if admin:

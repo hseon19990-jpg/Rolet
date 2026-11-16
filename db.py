@@ -25,8 +25,10 @@ CREATE UNIQUE INDEX IF NOT EXISTS ux_link_default ON invite_links(owner_id) WHER
 CREATE UNIQUE INDEX IF NOT EXISTS ux_link_chan ON invite_links(owner_id, channel_id) WHERE channel_id IS NOT NULL;
 CREATE TABLE IF NOT EXISTS referrals(
  user_id INTEGER PRIMARY KEY, owner_id INTEGER, link_code TEXT, source TEXT, source_id INTEGER,
- created_at INTEGER, status TEXT DEFAULT 'pending', claim_id INTEGER);
+ created_at INTEGER, status TEXT DEFAULT 'pending', claim_id INTEGER, strat_ok INTEGER DEFAULT 1);
 CREATE INDEX IF NOT EXISTS ix_ref_link ON referrals(link_code, status);
+CREATE TABLE IF NOT EXISTS star_withdrawals(
+ id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER, stars INTEGER, status TEXT DEFAULT 'pending', created_at INTEGER, decided_at INTEGER);
 CREATE TABLE IF NOT EXISTS payouts(
  id INTEGER PRIMARY KEY AUTOINCREMENT, owner_id INTEGER, amount REAL, count INTEGER,
  status TEXT DEFAULT 'pending', note TEXT, created_at INTEGER, decided_at INTEGER, decided_by INTEGER);
@@ -86,10 +88,12 @@ class DB:
                 self.conn.execute(f"ALTER TABLE events ADD COLUMN {col}")
             except sqlite3.OperationalError:
                 pass
-        try:
-            self.conn.execute("ALTER TABLE candidates ADD COLUMN approved INTEGER DEFAULT 1")
-        except sqlite3.OperationalError:
-            pass
+        for stmt in ("ALTER TABLE candidates ADD COLUMN approved INTEGER DEFAULT 1",
+                     "ALTER TABLE referrals ADD COLUMN strat_ok INTEGER DEFAULT 1"):   # القديمة تبقى معتمدة (1)
+            try:
+                self.conn.execute(stmt)
+            except sqlite3.OperationalError:
+                pass
         self.cache = dict(DEFAULTS)
         for r in self.conn.execute("SELECT key,value FROM settings"):
             self.cache[r["key"]] = r["value"]

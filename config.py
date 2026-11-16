@@ -13,6 +13,9 @@ BOT_TOKEN = os.getenv("BOT_TOKEN", "").strip()
 # ايدي المالك/المالكين (مفصولة بفاصلة)
 OWNER_IDS = _ids(os.getenv("ADMIN_IDS", ""))
 # على Railway اربط Volume على المسار /data حتى ما تضيع البيانات
+# سر مشترك مع بوت ستارت لتأكيد إكمال الإحالة هناك (ضع نفس القيمة بالبوتين)
+STRAT_SECRET = os.getenv("STRAT_SECRET", "").strip()
+PORT = int(os.getenv("PORT", "8080") or 8080)
 DB_PATH = os.getenv("DB_PATH") or ("/data/bot.db" if os.path.isdir("/data") else "bot.db")
 
 # كل هذي الإعدادات تتغير من داخل البوت بالأمر /set
@@ -36,8 +39,12 @@ DEFAULTS = {
     "vote_min_age": "10",      # دقائق لازم تمر على دخول الحساب للبوت قبل ما يصوّت
     "burst_limit": "40",       # عدد إحالات بـ10 دقائق لنفس المنظّم يعتبر رشق مشبوه
     "weekly_post": "1",        # نشر أفضل المنظّمين أسبوعياً بقناتك الإجبارية
+    "strat_link": "",          # رابط إحالة حسابك الثاني ببوت ستارت (يظهر للمحال الجديد). فارغ = الميزة مطفأة
+    "withdraw_amounts": "50,100,150,250",   # مبالغ السحب بالنجوم المتاحة للعضو (النجمة = نقطة)
+    "strat_secret": "",        # سر الربط مع ستارت (يُضبط من زر بالإعدادات، لا يُعرض)
+    "points_per_ref": "1",     # نقاط المحيل عن كل إحالة مؤكدة
     "last_backup": "0",
     "last_weekly": "0",
     "last_digest": "0",
 }
-EDITABLE = [k for k in DEFAULTS if not k.startswith("last_")]
+EDITABLE = [k for k in DEFAULTS if not k.startswith("last_") and k != "strat_secret"]
