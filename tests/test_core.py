@@ -7,6 +7,20 @@ import time
 from types import SimpleNamespace as NS
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
+try:
+    import aiogram  # noqa: F401
+except ImportError:   # بيئة بلا aiogram: نستخدم بديلاً بسيطاً للوحة الأزرار فقط
+    import types
+    for _n in ("aiogram", "aiogram.utils", "aiogram.utils.keyboard"):
+        sys.modules[_n] = types.ModuleType(_n)
+
+    class _KB:
+        def button(self, **kw):
+            pass
+
+        def as_markup(self):
+            return None
+    sys.modules["aiogram.utils.keyboard"].InlineKeyboardBuilder = _KB
 import services as S  # noqa: E402
 from db import DB  # noqa: E402
 
@@ -29,8 +43,12 @@ class FakeBot:
     async def edit_message_text(self, *a, **kw):
         return None
 
-    async def edit_message_reply_markup(self, *a, **kw):
-        return None
+    deleted = set()   # (chat_id, message_id) محذوفة
+
+    async def edit_message_reply_markup(self, chat_id=None, message_id=None, **kw):
+        if (chat_id, message_id) in self.deleted:
+            raise Exception("Bad Request: message to edit not found")
+        raise Exception("Bad Request: message is not modified")
 
 
 _real_sleep = asyncio.sleep
@@ -208,6 +226,64 @@ async def main():
     link = S.open_link({"user_id": 555, "first_name": "Ali", "username": "ali_x"})
     assert 'href="tg://openmessage?user_id=555"' in link and "@ali_x" in link and "555" in link
     print("✓ join-notification link format")
+
+    # 14) حذف رسالة الفعالية: إزالة المشترك + إشعار + زر إرجاع + إعادة نشر تلقائية بعد 5 دقائق
+    import ctx
+    ctx.bot_username = "testbot"
+    e4 = await db.insert("INSERT INTO events(owner_id,kind,title,winners,channel_id,created_at,end_at,max_channels,min_members,promo_text) "
+                         "VALUES(?,?,?,?,?,?,?,?,?,?)", 100, "chroulette", "CH2", 1, -777, S.now(), S.now() + 3600, 10, 0, "promo")
+    for chat, uid_ in ((-10, 7), (-11, 7), (-12, 8)):
+        await db.run("INSERT INTO event_entries VALUES(?,?,?,?,?,?,?)", e4, chat, uid_, f"c{chat}", 500, 50 + abs(chat), S.now())
+        await db.run("INSERT OR IGNORE INTO participants VALUES(?,?,?)", e4, uid_, S.now())
+        bot.members[(chat, uid_)] = "administrator"
+        bot.members[(chat, 1)] = "administrator"          # البوت مشرف بصلاحية النشر
+    bot.deleted = {(-10, 60), (-12, 62)}                  # المستخدم 7 حذف رسالة قناة، والمستخدم 8 حذف رسالته
+    bot.sent.clear()
+    await S.watch_entries(bot, db)
+    left = {(r["chat_id"], r["user_id"]) for r in await db.all("SELECT chat_id,user_id FROM event_entries WHERE event_id=?", e4)}
+    assert left == {(-11, 7)}, left                       # المحذوفة أُزيلت والباقية بقيت
+    assert await db.val("SELECT 1 FROM participants WHERE event_id=? AND user_id=8", e4) is None   # لا قنوات متبقية
+    assert await db.val("SELECT 1 FROM participants WHERE event_id=? AND user_id=7", e4)           # ما زال لديه قناة
+    notes = [s for s in bot.sent if s[0] in (7, 8)]
+    assert len(notes) == 2 and "أُزيلت مشاركتك" in notes[0][1]
+    print("✓ deleted message ⇒ entry removed + user notified")
+
+    # لا إعادة نشر قبل مرور 5 دقائق
+    bot.sent.clear()
+    await S.watch_entries(bot, db)
+    assert not [s for s in bot.sent if s[0] in (-10, -12)]
+    # زر الإرجاع قبل انتهاء المهلة: ينشر الرسالة ويعيد المشترك فوراً
+    ok, txt = await S.restore_entry(bot, db, e4, -10, 7)
+    assert ok, txt
+    assert await db.val("SELECT 1 FROM event_entries WHERE event_id=? AND chat_id=-10 AND user_id=7", e4)
+    assert [s for s in bot.sent if s[0] == -10 and s[1] == "promo"]
+    assert not (await S.restore_entry(bot, db, e4, -10, 7))[0]       # ضغط مكرر لا يضاعف الفرص
+    assert not (await S.restore_entry(bot, db, e4, -12, 9))[0]       # غير صاحب المشاركة
+    print("✓ return button re-posts the message and restores the entry")
+
+    # بعد 5 دقائق: إعادة نشر تلقائية للقناة -12 (المشترك يبقى مُزالاً حتى يضغط إرجاع)
+    await db.run("UPDATE entry_removals SET removed_at=? WHERE event_id=?", S.now() - S.REPOST_DELAY - 1, e4)
+    bot.sent.clear()
+    await S.watch_entries(bot, db)
+    assert [s for s in bot.sent if s[0] == -12 and s[1] == "promo"], bot.sent
+    assert not await db.val("SELECT 1 FROM event_entries WHERE event_id=? AND chat_id=-12", e4)
+    await S.watch_entries(bot, db)                                    # لا تكرار
+    assert len([s for s in bot.sent if s[0] == -12 and s[1] == "promo"]) == 1
+    ok, _ = await S.restore_entry(bot, db, e4, -12, 8)                # الإرجاع يستخدم الرسالة المنشورة تلقائياً
+    assert ok and len([s for s in bot.sent if s[0] == -12 and s[1] == "promo"]) == 1
+    print("✓ auto re-post after 5 min (no duplicates)")
+
+    # البوت فقد الصلاحية: لا إعادة نشر تلقائية ولا إرجاع
+    bot.deleted.add((-11, 61))
+    await S.watch_entries(bot, db)
+    assert not await db.val("SELECT 1 FROM event_entries WHERE event_id=? AND chat_id=-11", e4)
+    bot.members[(-11, 1)] = "member"
+    await db.run("UPDATE entry_removals SET removed_at=? WHERE event_id=?", S.now() - S.REPOST_DELAY - 1, e4)
+    bot.sent.clear()
+    await S.watch_entries(bot, db)
+    assert not [s for s in bot.sent if s[0] == -11]
+    assert not (await S.restore_entry(bot, db, e4, -11, 7))[0]
+    print("✓ no auto re-post without admin/post rights")
     print("ALL OK")
 
 
