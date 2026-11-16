@@ -10,7 +10,7 @@ from aiogram.utils.keyboard import InlineKeyboardBuilder
 import ctx
 from i18n import t
 from handlers_user import fails_screen
-from services import (KIND_ICON, KIND_LABEL, audit, check_user, ensure_channel_link, event_text, notify_join, now, post_markup, post_text, refresh_post,
+from services import (KIND_ICON, KIND_LABEL, audit, check_user, ensure_channel_link, event_text, notify_join, now, post_markup, post_text, refresh_post, schedule_refresh, is_manual,
                       promo_markup, promo_text, restore_entry, return_markup)
 from ui import channel_url, home_kb, resolve_channel, show
 
@@ -118,6 +118,9 @@ async def advance(target, state: FSMContext):
         kb.button(text="♾ مفتوح (أنهيها بنفسي)", callback_data="d:0")
         kb.adjust(3)
         return await target.answer("⏰ مدة الفعالية؟ اضغط أو اكتب عدد الساعات:", reply_markup=kb.as_markup())
+    if "draw_mode" not in d and not ctx.is_owner(state.key.user_id):
+        await state.update_data(draw_mode="auto")   # غير المالك: سحب عشوائي دائماً
+        d["draw_mode"] = "auto"
     if "draw_mode" not in d:
         await state.set_state(New.mode)
         kb = InlineKeyboardBuilder()
@@ -206,8 +209,11 @@ async def in_winners(m: Message, state: FSMContext):
 @router.callback_query(StateFilter(New.hours), F.data.startswith("d:"))
 async def cb_hours(cb: CallbackQuery, state: FSMContext):
     h = float(cb.data[2:])
-    if h == 0:   # وقت مفتوح: لا ينتهي تلقائياً، السحب يدوي
-        await state.update_data(hours=24 * 365 * 10, draw_mode="manual")
+    if h == 0:   # وقت مفتوح: لا ينتهي تلقائياً
+        if ctx.is_owner(cb.from_user.id):
+            await state.update_data(hours=24 * 365 * 10, draw_mode="manual")
+        else:
+            await state.update_data(hours=24 * 365 * 10)
     else:
         await state.update_data(hours=h)
     await cb.answer()
@@ -234,7 +240,8 @@ async def cb_approve_mode(cb: CallbackQuery, state: FSMContext):
 
 @router.callback_query(StateFilter(New.mode), F.data.startswith("dm:"))
 async def cb_mode(cb: CallbackQuery, state: FSMContext):
-    await state.update_data(draw_mode=cb.data[3:] if cb.data[3:] in ("auto", "manual") else "auto")
+    mode = cb.data[3:] if cb.data[3:] in ("auto", "manual") else "auto"
+    await state.update_data(draw_mode=mode if ctx.is_owner(cb.from_user.id) else "auto")
     await cb.answer()
     await advance(cb.message, state)
 
@@ -280,7 +287,6 @@ async def show_conditions(target, state, edit=None):
              f"{KIND_LABEL[d['kind']]} • 👑 {d['winners']} • ⏰ {d['hours']} ساعة", "",
              "📌 <b>الشروط الإضافية</b> (الاشتراك بقنوات المالك الإجبارية يُطبَّق تلقائياً):",
              f"💎 بريميوم: {'✅' if d.get('premium') else '❌'}",
-             f"🎯 تحديد الفائز: {'يدوي' if d.get('draw_mode') == 'manual' else 'تلقائي'}",
              f"💬 تعليق: {'✅ (البوت مشرف بالقناة والمجموعة)' if d.get('comment_chat') else '❌'}",
              f"🤖 تفعيل بوت: {'✅' if d.get('bot_url') else '❌'}",
              f"🗳 تصويت (رابط التعليق): {'✅' if d.get('vote_url') else '❌'}",
@@ -289,6 +295,8 @@ async def show_conditions(target, state, edit=None):
         lines.append(f"🎟 فرص بالدعوة: {'✅ حتى ' + str(d['invite']) if d.get('invite') else '❌'}")
     if d["kind"] == "chroulette":
         lines.append(f"👥 أقل أعضاء بالقناة: {d.get('min_members', 0)}")
+    if ctx.is_owner(state.key.user_id):   # يظهر لمالك البوت فقط، وبالخاص
+        lines.insert(5, f"🎯 تحديد الفائز: {'يدوي' if d.get('draw_mode') == 'manual' else 'عشوائي'}")
     kb = InlineKeyboardBuilder()
     kb.button(text="💎 بريميوم", callback_data="c:prem")
     kb.button(text="💬 تعليق", callback_data="c:com")
@@ -528,7 +536,7 @@ async def publish(cb, state, bot):
         now() + int(d["hours"] * 3600), int(bool(d.get("premium"))), d.get("comment_chat"),
         d.get("comment_text"), d.get("bot_url"), int(d.get("invite", 0) or 0), d.get("promo"),
         int(d.get("min_members", 0)), int(ctx.db.get("chroulette_max_channels")), d.get("comment_url"), d.get("vote_url"),
-        d.get("draw_mode") or "auto", int(d.get("approve", 0)))
+        (d.get("draw_mode") or "auto") if ctx.is_owner(uid) else "auto", int(d.get("approve", 0)))
     for ch in d.get("extra", []):
         await db.run("INSERT OR IGNORE INTO event_channels(event_id,chat_id,title,username,url) VALUES(?,?,?,?,?)",
                      eid, ch["chat_id"], ch["title"], ch["username"], ch["url"])
@@ -596,14 +604,15 @@ async def manage_view(cb, ev):
         else await db.val("SELECT COUNT(*) FROM candidates WHERE approved=1 AND event_id=?", ev["id"])
     left = max(0, ev["end_at"] - now())
     txt = (f"⚙️ <b>{esc(ev['title'])}</b> (#{ev['id']})\nالحالة: {ev['status']}\n"
-           f"🎯 الفائز: {'يدوي' if ev['draw_mode'] == 'manual' else 'تلقائي'}\n"
+           + (f"🎯 الفائز: {'يدوي' if is_manual(ev) else 'عشوائي'}\n" if ctx.is_owner(cb.from_user.id) else "") +
            f"{'👥 المشاركون' if ev['kind'] != 'votes' else '🙋 المتسابقون'}: {cnt}\n"
            f"⏳ المتبقي: " + ("♾ مفتوحة" if left > 86400 * 365 * 5 else f"{left // 3600} ساعة {left % 3600 // 60} دقيقة"))
     kb = InlineKeyboardBuilder()
     if ev["status"] == "active":
         kb.button(text="🎡 تدوير العجلة (سحب تلقائي الآن)" if ev["kind"] != "votes" else "🏁 إنهاء الآن (الأعلى أصواتاً)",
                   callback_data=f"evend:{ev['id']}")
-        kb.button(text="🎯 اختيار الفائز يدوياً", callback_data=f"evpick:{ev['id']}")
+        if ctx.is_owner(cb.from_user.id):
+            kb.button(text="🎯 اختيار الفائز يدوياً", callback_data=f"evpick:{ev['id']}")
         kb.button(text="⏱ +1 ساعة", callback_data=f"evext:{ev['id']}:1")
         kb.button(text="⏱ +24 ساعة", callback_data=f"evext:{ev['id']}:24")
         kb.button(text="🤝 مشاركة/نقل الصلاحيات", callback_data=f"evshr:{ev['id']}")
@@ -671,6 +680,8 @@ async def pick_render(cb, state):
 
 @router.callback_query(F.data.startswith("evpick:"))
 async def ev_pick(cb: CallbackQuery, state: FSMContext):
+    if not ctx.is_owner(cb.from_user.id):
+        return await cb.answer("غير مسموح", show_alert=True)
     ev = await owned_event(cb, int(cb.data[7:]))
     if not ev:
         return
@@ -687,6 +698,9 @@ async def ev_pick(cb: CallbackQuery, state: FSMContext):
 
 @router.callback_query(StateFilter(Pick.sel), F.data.startswith("pk:"))
 async def pick_action(cb: CallbackQuery, state: FSMContext, bot: Bot):
+    if not ctx.is_owner(cb.from_user.id):
+        await state.clear()
+        return await cb.answer("غير مسموح", show_alert=True)
     d = await state.get_data()
     ev = await owned_event(cb, d.get("ev_id", 0))
     if not ev:
@@ -882,6 +896,7 @@ async def entry_msg(m: Message, state: FSMContext, bot: Bot):
     await db.run("INSERT OR IGNORE INTO event_entries(event_id,chat_id,user_id,title,members,message_id,created_at) "
                  "VALUES(?,?,?,?,?,?,?)", ev["id"], chat.id, uid, chat.title, members, msg.message_id, now())
     await db.run("INSERT OR IGNORE INTO participants(event_id,user_id,joined_at) VALUES(?,?,?)", ev["id"], uid, now())
+    schedule_refresh(bot, db, ev["id"])
     await state.clear()
     cnt = mine + 1
     await notify_join(bot, db, ev, uid, extra=f"\n📺 القناة: {esc(chat.title or '')} ({members} عضو) • فرصه الآن: {cnt}")
@@ -1025,7 +1040,9 @@ async def ch_win(cb: CallbackQuery, bot: Bot):
     if ev["owner_id"] != uid and not ctx.is_admin(uid) and not await ctx.db.one(
             "SELECT 1 FROM event_managers WHERE event_id=? AND user_id=?", ev["id"], uid):
         return await cb.answer("🚫 للمنظّم فقط.", show_alert=True)
-    if ev["draw_mode"] == "manual":   # فعالية يدوية: نفتح للمنظّم اختيار الفائز بالخاص
+    if is_manual(ev):   # فعالية يدوية (مالك البوت فقط)
+        if not ctx.is_owner(uid):
+            return await cb.answer("🚫 للمنظّم فقط.", show_alert=True)
         kb = InlineKeyboardBuilder()
         kb.button(text="🎯 اختيار الفائز", callback_data=f"evpick:{ev['id']}")
         kb.button(text="🎡 سحب عشوائي الآن", callback_data=f"evend:{ev['id']}")

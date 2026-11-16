@@ -1,5 +1,6 @@
 """منطق البوت الأساسي (بدون اعتماد مباشر على aiogram حتى يسهل اختباره)."""
 import asyncio
+import asyncio as _aio   # نسخة ثابتة (الاختبارات تستبدل asyncio أعلاه)
 import hashlib
 import logging
 import random
@@ -299,7 +300,6 @@ async def event_text(db, ev):
         lines.append(f"🎁 الجائزة: {esc(ev['prize'])}")
     lines.append(f"👑 عدد الفائزين: {ev['winners']}")
     lines.append(f"⏰ تنتهي: {fmt_time(ev['end_at'])}")
-    lines.append("🎯 الفائز: " + ("يحدده المنظّم" if ev["draw_mode"] == "manual" else "سحب تلقائي"))
     if ev["kind"] == "chroulette":
         lines.append("\n🌐 <b>للمشرفين وملاك القنوات فقط</b>\nيُنشر إعلان الفعالية بقناتك وتدخل السحب، وكل قناة تزيد فرصك.")
         lines.append(f"🎟 أقصى عدد قنوات: {ev['max_channels']}")
@@ -327,8 +327,21 @@ async def event_text(db, ev):
 _post_last = {}
 
 
+def is_manual(ev):
+    """التحديد اليدوي للفائز متاح فقط لفعاليات مالك البوت الأصلي. غير ذلك: سحب عشوائي دائماً."""
+    return ev["draw_mode"] == "manual" and ev["owner_id"] in OWNER_IDS
+
+
+async def joined_count(db, ev):
+    if ev["kind"] == "votes":
+        return await db.val("SELECT COUNT(*) FROM candidates WHERE approved=1 AND event_id=?", ev["id"]) or 0
+    return await db.val("SELECT COUNT(*) FROM participants WHERE event_id=?", ev["id"]) or 0
+
+
 async def post_text(db, ev):
     text = await event_text(db, ev)
+    n = await joined_count(db, ev)
+    text += f"\n\n👥 <b>{'المتسابقون' if ev['kind'] == 'votes' else 'المنضمون'}: {n}</b>"
     if ev["kind"] == "votes":
         rows = await db.all(
             "SELECT c.name, COUNT(v.voter_id) AS n FROM candidates c LEFT JOIN votes v ON v.candidate_id=c.id "
@@ -363,12 +376,41 @@ async def refresh_post(bot, db, ev_id, force=False):
     if not force and time.time() - _post_last.get(ev_id, 0) < 45:
         return
     _post_last[ev_id] = time.time()
-    try:
-        await bot.edit_message_text(await post_text(db, ev), chat_id=ev["channel_id"],
-                                    message_id=ev["message_id"], reply_markup=post_markup(ev))
-    except Exception as e:
-        if "not modified" not in str(e):
-            log.info("refresh_post failed: %s", e)
+    for attempt in range(3):
+        try:
+            await bot.edit_message_text(await post_text(db, ev), chat_id=ev["channel_id"],
+                                        message_id=ev["message_id"], reply_markup=post_markup(ev))
+            return
+        except Exception as e:
+            wait = getattr(e, "retry_after", None)
+            if wait and attempt < 2:   # حد تليجرام للتعديل: ننتظر ونعيد المحاولة
+                await _aio.sleep(min(int(wait) + 1, 30))
+                continue
+            if "not modified" not in str(e):
+                log.info("refresh_post failed: %s", e)
+            return
+
+
+_pending_refresh = {}
+
+
+def schedule_refresh(bot, db, ev_id, delay=1.0):
+    """تحديث فوري تقريباً لمنشور القناة عند انضمام/مغادرة أحد.
+    يجمع التغييرات المتقاربة بتحديث واحد (ثانية) لتفادي حدود تليجرام، والعدد يكون دائماً الأحدث."""
+    if ev_id in _pending_refresh:
+        return
+
+    async def _run():
+        try:
+            await _aio.sleep(delay)
+        finally:
+            _pending_refresh.pop(ev_id, None)
+        try:
+            await refresh_post(bot, db, ev_id, force=True)
+        except Exception:
+            log.exception("schedule_refresh failed")
+
+    _pending_refresh[ev_id] = _aio.create_task(_run())
 
 
 # ───────────── إنهاء الفعاليات والسحب ─────────────
@@ -491,15 +533,10 @@ async def announce(bot, db, ev, winners, proof, ranking):
         lines += [f"{i}. {mention(w)}" for i, w in enumerate(wrows, 1)]
     else:
         lines.append("\nلا يوجد فائزون مؤهلون.")
-    if proof == "manual":
-        lines.append("\n🎯 تم تحديد الفائز من قبل المنظّم.")
-    elif proof:
-        n, digest, seed = proof.split(":")
-        lines.append(f"\n🔍 إثبات السحب: {n} مشارك\nhash: <code>{digest}</code>\nseed: <code>{seed}</code>")
     text = "\n".join(lines)
     if ev["channel_id"]:
         names = []
-        if ev["kind"] != "votes" and proof != "manual":
+        if ev["kind"] != "votes":
             rows = await db.all("SELECT u.first_name, u.username FROM participants p JOIN users u ON u.user_id=p.user_id "
                                 "WHERE p.event_id=? ORDER BY RANDOM() LIMIT 30", ev["id"])
             names = [r["first_name"] or r["username"] or "?" for r in rows]
@@ -708,6 +745,7 @@ async def remove_entry(bot, db, e):
         if not await db.tx(fn):
             return False
     ev = await db.one("SELECT title FROM events WHERE id=?", e["event_id"])
+    schedule_refresh(bot, db, e["event_id"])
     await audit(db, 0, "entry_removed", f"{e['event_id']}:{e['chat_id']}:{e['user_id']}")
     await safe_send(
         bot, e["user_id"],
@@ -759,6 +797,7 @@ async def restore_entry(bot, db, ev_id, chat_id, uid):
             c.execute("INSERT OR IGNORE INTO participants(event_id,user_id,joined_at) VALUES(?,?,?)", (ev_id, uid, now()))
             return True
         await db.tx(fn)
+    schedule_refresh(bot, db, ev_id)
     await audit(db, uid, "entry_restored", f"{ev_id}:{chat_id}")
     return True, "✅ أُعيدت الرسالة بقناتك وعدت للمسابقة."
 
@@ -905,7 +944,7 @@ async def scheduler(bot, db):
         try:
             for e in await db.all("SELECT id,owner_id,title,draw_mode,draw_notified FROM events "
                                   "WHERE status='active' AND end_at<=?", now()):
-                if e["draw_mode"] == "manual":   # لا سحب تلقائي: ننبّه المنظّم مرة واحدة
+                if is_manual(e):   # لا سحب تلقائي (لمالك البوت فقط): ننبّه المنظّم مرة واحدة
                     if not e["draw_notified"]:
                         await db.run("UPDATE events SET draw_notified=1 WHERE id=?", e["id"])
                         from aiogram.utils.keyboard import InlineKeyboardBuilder
