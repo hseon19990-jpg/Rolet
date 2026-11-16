@@ -361,13 +361,21 @@ def post_markup(ev):
     from aiogram.utils.keyboard import InlineKeyboardBuilder
     link = f"https://t.me/{ctx.bot_username}?start=ev_{ev['id']}"
     kb = InlineKeyboardBuilder()
+    if ev["kind"] == "roulette":   # واجهة القناة: انضم | انسحب، شارك (إن فُعّلت الدعوات)، وزر المسؤول
+        kb.button(text="✅ انضم", callback_data=f"chj:{ev['id']}")
+        kb.button(text="🚪 انسحب", callback_data=f"chl:{ev['id']}")
+        if ev["invite_bonus"]:
+            kb.button(text="📤 شارك", callback_data=f"chs:{ev['id']}")
+        kb.button(text="👑 للمسؤول: اسحب فائز", callback_data=f"chwin:{ev['id']}")
+        kb.adjust(2, 1, 1) if ev["invite_bonus"] else kb.adjust(2, 1)
+        return kb.as_markup()
     if ev["kind"] != "votes":
         kb.button(text="🎡 شارك الآن", url=link)
     else:
         kb.button(text="🙋 سجّل كمتسابق", url=link)
         kb.button(text="🗳 صوّت", url=link)
         kb.button(text="📊 الترتيب", callback_data=f"rank:{ev['id']}")
-    kb.button(text="👑 للمنظّم: سحب الفائز", callback_data=f"chwin:{ev['id']}")
+    kb.button(text="👑 للمسؤول: اسحب فائز", callback_data=f"chwin:{ev['id']}")
     kb.adjust(1)
     return kb.as_markup()
 

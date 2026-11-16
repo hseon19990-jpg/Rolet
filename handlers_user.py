@@ -108,6 +108,8 @@ async def route(target, uid, lang, payload):
                 await ctx.db.run("INSERT OR IGNORE INTO event_invites(event_id,user_id,inviter_id) VALUES(?,?,?)",
                                  eid, uid, int(parts[2]))
             return await show_event(target, lang, eid)
+        if payload.startswith("sh_"):
+            return await show_share(target, uid, int(payload.split("_")[1]))
         if payload.startswith("v_"):
             _, e, c = payload.split("_")
             return await show_candidate(target, lang, int(e), int(c))
@@ -299,11 +301,88 @@ async def join(cb: CallbackQuery, bot: Bot):
         await notify_join(bot, db, ev, cb.from_user.id)
         await check_join_goal(bot, db, ev_id)
     if ev["invite_bonus"]:
-        link = f"https://t.me/{ctx.bot_username}?start=ev_{ev_id}_{cb.from_user.id}"
-        cnt = await db.val("SELECT COUNT(*) FROM event_invites i JOIN participants p ON p.event_id=i.event_id "
-                           "AND p.user_id=i.user_id WHERE i.event_id=? AND i.inviter_id=?", ev_id, cb.from_user.id)
+        link = invite_link(ev_id, cb.from_user.id)
+        cnt, _ch = await chances_of(db, ev, cb.from_user.id)
         await cb.message.answer(f"🎟 ارفع فرصك! كل صديق يشارك عبر رابطك يعطيك فرصة إضافية (حتى {ev['invite_bonus']}).\n"
                                 f"🔗 {link}\n\nفرصك الآن: {1 + min(cnt, ev['invite_bonus'])}")
+
+
+def invite_link(ev_id, uid):
+    """رابط يحمل الفعالية + صاحب الدعوة: t.me/البوت?start=ev_<الفعالية>_<الداعي>"""
+    return f"https://t.me/{ctx.bot_username}?start=ev_{ev_id}_{uid}"
+
+
+async def chances_of(db, ev, uid):
+    cnt = await db.val("SELECT COUNT(*) FROM event_invites i JOIN participants p ON p.event_id=i.event_id "
+                       "AND p.user_id=i.user_id WHERE i.event_id=? AND i.inviter_id=?", ev["id"], uid)
+    return cnt, 1 + min(cnt, ev["invite_bonus"] or 0)
+
+
+@router.callback_query(F.data.startswith("chj:"))
+async def ch_join(cb: CallbackQuery, bot: Bot):
+    """زر «انضم» داخل القناة."""
+    db = ctx.db
+    await db.touch_user(cb.from_user)
+    ev_id = int(cb.data[4:])
+    ev, lang = await load_active(cb, ev_id)
+    if not ev:
+        return
+    if ev["kind"] != "roulette":
+        return await cb.answer("غير متاح.", show_alert=True)
+    if await check_user(bot, db, ev, cb.from_user.id):   # شروط ناقصة (كابتشا/اشتراك...): نفتح البوت لإكمالها
+        return await cb.answer(url=f"https://t.me/{ctx.bot_username}?start=ev_{ev_id}")
+    n = await db.run("INSERT OR IGNORE INTO participants(event_id,user_id,joined_at) VALUES(?,?,?)",
+                     ev_id, cb.from_user.id, now())
+    await cb.answer(t(lang, "joined" if n else "already"), show_alert=True)
+    if n:
+        schedule_refresh(bot, db, ev_id)
+        await notify_join(bot, db, ev, cb.from_user.id)
+        await check_join_goal(bot, db, ev_id)
+
+
+@router.callback_query(F.data.startswith("chl:"))
+async def ch_leave(cb: CallbackQuery, bot: Bot):
+    """زر «انسحب» داخل القناة."""
+    db = ctx.db
+    ev, lang = await load_active(cb, int(cb.data[4:]))
+    if not ev:
+        return
+    n = await db.run("DELETE FROM participants WHERE event_id=? AND user_id=?", ev["id"], cb.from_user.id)
+    await cb.answer("🚪 تم انسحابك من الفعالية." if n else "أنت غير منضم أصلاً.", show_alert=True)
+    if n:
+        schedule_refresh(bot, db, ev["id"])
+
+
+@router.callback_query(F.data.startswith("chs:"))
+async def ch_share(cb: CallbackQuery):
+    """زر «شارك»: يفتح البوت ليعطيه رابطه الخاص بهذه الفعالية."""
+    ev, lang = await load_active(cb, int(cb.data[4:]))
+    if not ev:
+        return
+    if not ev["invite_bonus"]:
+        return await cb.answer("الدعوات غير مفعّلة لهذه الفعالية.", show_alert=True)
+    await cb.answer(url=f"https://t.me/{ctx.bot_username}?start=sh_{ev['id']}")
+
+
+async def show_share(target, uid, ev_id):
+    db = ctx.db
+    ev = await db.one("SELECT * FROM events WHERE id=?", ev_id)
+    if not ev or ev["status"] != "active" or not ev["invite_bonus"]:
+        return await target.answer("الدعوات غير متاحة لهذه الفعالية.")
+    cnt, chances = await chances_of(db, ev, uid)
+    link = invite_link(ev_id, uid)
+    joined = await db.val("SELECT 1 FROM participants WHERE event_id=? AND user_id=?", ev_id, uid)
+    kb = InlineKeyboardBuilder()
+    kb.button(text="📤 شارك رابطك", url="https://t.me/share/url?url=" + quote(link))
+    if not joined:
+        kb.button(text="✅ انضم للفعالية", callback_data=f"join:{ev_id}")
+    kb.adjust(1)
+    await target.answer(
+        f"🎟 <b>رابطك الخاص بفعالية «{esc(ev['title'])}»</b>\n\n🔗 {link}\n\n"
+        f"كل صديق يدخل من رابطك ويشارك = فرصة إضافية لك (حتى {ev['invite_bonus']}).\n"
+        f"👥 دعواتك المشاركة: {cnt}\n🎯 فرصك الآن: {chances}"
+        + ("" if joined else "\n\n⚠️ انضم أنت أيضاً حتى تدخل السحب."),
+        reply_markup=kb.as_markup())
 
 
 @router.callback_query(F.data.startswith("aprv:"))

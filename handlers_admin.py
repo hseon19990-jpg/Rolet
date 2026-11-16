@@ -5,7 +5,7 @@ from html import escape as esc
 
 from aiogram import Bot, F, Router
 from aiogram.exceptions import TelegramForbiddenError, TelegramRetryAfter
-from aiogram.filters import BaseFilter, Command, CommandObject
+from aiogram.filters import BaseFilter, Command, CommandObject, StateFilter
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.types import BufferedInputFile, CallbackQuery, FSInputFile, Message
@@ -14,7 +14,7 @@ from aiogram.utils.keyboard import InlineKeyboardBuilder
 import ctx
 from config import EDITABLE
 from services import audit, decide_payout, mention, now, owner_quality, safe_send, top_channels
-from ui import channel_url, resolve_channel, show
+from ui import channel_url, resolve_channel, resolve_channel_loose, show
 
 router = Router()
 
@@ -29,6 +29,10 @@ router.callback_query.filter(IsAdmin())
 
 
 class BC(StatesGroup):
+    wait = State()
+
+
+class AddMand(StatesGroup):
     wait = State()
 
 
@@ -177,11 +181,51 @@ async def adm_mand(cb: CallbackQuery):
     kb = InlineKeyboardBuilder()
     for r in rows:
         kb.button(text=f"🗑 {r['title']}", callback_data=f"mand:del:{r['chat_id']}")
+    if owner_only(cb.from_user.id):
+        kb.button(text="➕ إضافة قناة إجبارية", callback_data="mand:add")
     kb.button(text="⬅️ اللوحة", callback_data="adm:home")
     kb.adjust(1)
     await show(cb, "📢 <b>القنوات الإجبارية العامة</b> (تُطبَّق على كل الفعاليات)\n"
-                   "للإضافة: /addmand @القناة\n" + ("" if rows else "\nلا توجد قنوات."), kb.as_markup())
+                   "اضغط «إضافة» وأرسل القناة بأي شكل (رابط / @يوزر / ايدي / منشور محوّل).\n"
+                   + ("" if rows else "\nلا توجد قنوات."), kb.as_markup())
     await cb.answer()
+
+
+@router.callback_query(F.data == "mand:add")
+async def mand_add(cb: CallbackQuery, state: FSMContext):
+    if not owner_only(cb.from_user.id):
+        return await cb.answer("للمالك فقط", show_alert=True)
+    await state.clear()
+    await state.set_state(AddMand.wait)
+    await cb.answer()
+    await cb.message.answer("📢 أرسل القناة الإجبارية: رابط أو @يوزر أو ايدي أو حوّل منشوراً منها.\n"
+                            "(للإلغاء: /cancel)")
+
+
+async def _save_mand(m: Message, state: FSMContext, bot: Bot):
+    if not owner_only(m.from_user.id):
+        return
+    chat, note, err = await resolve_channel_loose(m, bot)
+    if err:
+        return await m.answer(err)
+    url = await channel_url(bot, chat)
+    await ctx.db.run("INSERT INTO mandatory_channels(chat_id,title,username,url,added_at) VALUES(?,?,?,?,?) "
+                     "ON CONFLICT(chat_id) DO UPDATE SET title=excluded.title, username=excluded.username, url=excluded.url",
+                     chat.id, chat.title, chat.username, url, now())
+    await audit(ctx.db, m.from_user.id, "mand_add", chat.id)
+    await state.clear()
+    await m.answer(f"✅ أضفت «{esc(chat.title or '')}» كقناة إجبارية عامة." + (f"\n\n{note}" if note else ""),
+                   reply_markup=back_kb())
+
+
+@router.message(StateFilter(AddMand.wait), F.forward_origin)
+async def mand_in_fwd(m: Message, state: FSMContext, bot: Bot):
+    await _save_mand(m, state, bot)
+
+
+@router.message(StateFilter(AddMand.wait), F.text, ~F.text.startswith("/"))
+async def mand_in_text(m: Message, state: FSMContext, bot: Bot):
+    await _save_mand(m, state, bot)
 
 
 @router.callback_query(F.data.startswith("mand:del:"))

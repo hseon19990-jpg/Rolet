@@ -12,7 +12,7 @@ from i18n import t
 from handlers_user import fails_screen
 from services import (KIND_ICON, KIND_LABEL, audit, check_user, ensure_channel_link, event_text, notify_join, now, post_markup, post_text, refresh_post, schedule_refresh, is_manual, check_join_goal,
                       promo_markup, promo_text, restore_entry, return_markup)
-from ui import channel_url, home_kb, resolve_channel, show
+from ui import channel_url, home_kb, resolve_channel, resolve_channel_loose, show
 
 router = Router()
 NOT_CMD = ~F.text.startswith("/")
@@ -392,7 +392,7 @@ async def cb_cond(cb: CallbackQuery, state: FSMContext, bot: Bot):
         await state.update_data(ask="chan")
         await state.set_state(New.cond_text)
         await cb.answer()
-        return await cb.message.answer("📢 أرسل @يوزر القناة أو حوّل منشوراً منها (لازم تكون مشرفاً والبوت مشرف فيها).")
+        return await cb.message.answer("📢 أرسل القناة بأي شكل: رابط أو @يوزر أو ايدي أو منشور محوّل (حتى لو البوت غير مشرف).")
     if act == "done":
         await cb.answer()
         return await publish(cb, state, bot)
@@ -515,9 +515,11 @@ async def in_cond_text(m: Message, state: FSMContext, bot: Bot):
             return await m.answer("أرسل رابط يبدأ بـ https://t.me/")
         await state.update_data(bot_url=url)
     elif ask == "chan":
-        chat, err = await resolve_channel(m, bot)
+        chat, note, err = await resolve_channel_loose(m, bot)
         if err:
             return await m.answer(err)
+        if note:
+            await m.answer(note)
         url = await channel_url(bot, chat)
         extra = [c for c in d.get("extra", []) if c["chat_id"] != chat.id]
         extra.append({"chat_id": chat.id, "title": chat.title, "username": chat.username, "url": url})
@@ -1046,9 +1048,9 @@ async def ch_win(cb: CallbackQuery, bot: Bot):
     if ev["owner_id"] != uid and not ctx.is_admin(uid) and not await ctx.db.one(
             "SELECT 1 FROM event_managers WHERE event_id=? AND user_id=?", ev["id"], uid):
         return await cb.answer("🚫 للمنظّم فقط.", show_alert=True)
-    if is_manual(ev):   # فعالية يدوية (مالك البوت فقط)
-        if not ctx.is_owner(uid):
-            return await cb.answer("🚫 للمنظّم فقط.", show_alert=True)
+    if is_manual(ev) and not ctx.is_owner(uid):
+        return await cb.answer("🚫 للمنظّم فقط.", show_alert=True)
+    if ctx.is_owner(uid):   # مالك البوت: يختار بين تحديد الفائز بنفسه أو السحب العشوائي
         kb = InlineKeyboardBuilder()
         kb.button(text="🎯 اختيار الفائز", callback_data=f"evpick:{ev['id']}")
         kb.button(text="🎡 سحب عشوائي الآن", callback_data=f"evend:{ev['id']}")

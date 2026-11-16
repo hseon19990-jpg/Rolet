@@ -77,3 +77,45 @@ async def channel_url(bot, chat):
         return await bot.export_chat_invite_link(chat.id)
     except Exception:
         return None
+
+
+async def resolve_channel_loose(m, bot):
+    """يقبل القناة بأي شكل (رابط / منشور / @يوزر / ايدي / منشور محوّل) حتى لو البوت غير مشرف.
+    يرجع (chat, ملاحظة_أو_None, خطأ_أو_None)."""
+    import re
+    chat = None
+    fo = getattr(m, "forward_origin", None)
+    if fo is not None and getattr(fo, "chat", None) is not None:
+        chat = fo.chat
+    else:
+        txt = (getattr(m, "text", None) or getattr(m, "caption", None) or "").strip()
+        ref = None
+        mm = re.search(r"(?:https?://)?(?:www\.)?(?:t|telegram)\.(?:me|dog)/([^\s/?]+)", txt, re.I)
+        if mm:
+            name = mm.group(1)
+            if name == "c":
+                mc = re.search(r"/c/(\d+)", txt)
+                ref = int("-100" + mc.group(1)) if mc else None
+            elif name.startswith("+") or name == "joinchat":
+                return None, None, "❌ روابط الدعوة الخاصة لا أستطيع قراءتها. أرسل @يوزر القناة أو ايديها أو حوّل منشوراً منها."
+            else:
+                ref = "@" + name
+        else:
+            u = re.search(r"@([A-Za-z][\w]{3,})", txt)
+            i = re.search(r"(?<![\w/])-?\d{6,}(?!\w)", txt)
+            ref = ("@" + u.group(1)) if u else (int(i.group(0)) if i else None)
+        if ref is None:
+            return None, None, "أرسل رابط القناة أو @يوزرها أو ايديها أو حوّل منشوراً منها."
+        try:
+            chat = await bot.get_chat(ref)
+        except Exception:
+            return None, None, "❌ لم أجد القناة. تأكد من الرابط/اليوزر."
+    if chat.type not in ("channel", "supergroup", "group"):
+        return None, None, "❌ أرسل قناة أو مجموعة."
+    try:
+        admin = (await bot.get_chat_member(chat.id, bot.id)).status == "administrator"
+    except Exception:
+        admin = False
+    note = None if admin else ("⚠️ البوت ليس مشرفاً هناك، فلن يستطيع فحص الاشتراك تلقائياً (يُسمح للجميع بالمرور). "
+                               "اجعله مشرفاً ليعمل الفحص.")
+    return chat, note, None
