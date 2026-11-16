@@ -272,7 +272,7 @@ async def main():
     assert len([s for s in bot.sent if s[0] == -12 and s[1] == "promo"]) == 1
     ok, _ = await S.restore_entry(bot, db, e4, -12, 8)                # الإرجاع يستخدم الرسالة المنشورة تلقائياً
     assert ok and len([s for s in bot.sent if s[0] == -12 and s[1] == "promo"]) == 1
-    print("✓ auto re-post after 5 min (no duplicates)")
+    print("✓ auto re-post after 3 min (no duplicates)")
 
     # البوت فقد الصلاحية: لا إعادة نشر تلقائية ولا إرجاع
     bot.deleted.add((-11, 61))
