@@ -23,6 +23,8 @@ def rand_code(n=8):
 
 
 def fmt_time(ts):
+    if ts - time.time() > 86400 * 365 * 5:
+        return "♾ مفتوحة (ينهيها المنظّم)"
     return time.strftime("%Y-%m-%d %H:%M UTC", time.gmtime(ts))
 
 
@@ -258,17 +260,17 @@ async def check_user(bot, db, ev, user_id):
             "SELECT 1 FROM admin_overrides WHERE event_id=? AND user_id=? AND code=?", ev["id"], user_id, code)
 
     fails = []
-    if not u["verified"] and not is_adm:
+    if not u["verified"]:   # التحقق مطلوب من الجميع بمن فيهم المالك والمشرفون
         fails.append(("captcha", None))
     for ch in await mandatory_list(db, ev):
         if await is_member(bot, ch["chat_id"], user_id) is False:
             fails.append(("channel", ch))
     if ev["need_premium"] and not u["is_premium"] and not await approved("premium"):
         fails.append(("premium", None))
-    if ev["comment_text"] and not await db.val(
+    if ev["comment_chat"] and not await db.val(
             "SELECT 1 FROM comment_hits WHERE event_id=? AND user_id=?", ev["id"], user_id) \
             and not await approved("comment"):
-        fails.append(("comment", ev["comment_text"]))
+        fails.append(("comment", ev["comment_url"]))
     if ev["need_bot_url"] and not await db.val(
             "SELECT 1 FROM confirms WHERE event_id=? AND user_id=?", ev["id"], user_id):
         fails.append(("botconfirm", ev["need_bot_url"]))
@@ -297,6 +299,7 @@ async def event_text(db, ev):
         lines.append(f"🎁 الجائزة: {esc(ev['prize'])}")
     lines.append(f"👑 عدد الفائزين: {ev['winners']}")
     lines.append(f"⏰ تنتهي: {fmt_time(ev['end_at'])}")
+    lines.append("🎯 الفائز: " + ("يحدده المنظّم" if ev["draw_mode"] == "manual" else "سحب تلقائي"))
     if ev["kind"] == "chroulette":
         lines.append("\n🌐 <b>للمشرفين وملاك القنوات فقط</b>\nيُنشر إعلان الفعالية بقناتك وتدخل السحب، وكل قناة تزيد فرصك.")
         lines.append(f"🎟 أقصى عدد قنوات: {ev['max_channels']}")
@@ -308,9 +311,9 @@ async def event_text(db, ev):
     conds = [f"• الاشتراك بـ {esc(ch['title'] or '')}" for ch in await mandatory_list(db, ev)]
     if ev["need_premium"]:
         conds.append("• حساب تليجرام بريميوم")
-    if ev["comment_text"]:
-        where = f'<a href="{ev["comment_url"]}">الكروب</a>' if ev["comment_url"] else "الكروب المحدد"
-        conds.append(f"• تعليق «{esc(ev['comment_text'])}» في {where}")
+    if ev["comment_chat"]:
+        here = f'<a href="{ev["comment_url"]}">علق هنا</a>' if ev["comment_url"] else "علق هنا"
+        conds.append(f"• 💬 التعليق: {here}")
     if ev["need_bot_url"]:
         conds.append("• تفعيل بوت معيّن")
     if ev["vote_url"]:
@@ -318,6 +321,54 @@ async def event_text(db, ev):
     if conds:
         lines.append("\n📌 الشروط:\n" + "\n".join(conds))
     return "\n".join(lines)
+
+
+# ───────────── منشور القناة: أسماء المتسابقين + تحديث ─────────────
+_post_last = {}
+
+
+async def post_text(db, ev):
+    text = await event_text(db, ev)
+    if ev["kind"] == "votes":
+        rows = await db.all(
+            "SELECT c.name, COUNT(v.voter_id) AS n FROM candidates c LEFT JOIN votes v ON v.candidate_id=c.id "
+            "WHERE c.approved=1 AND c.event_id=? GROUP BY c.id ORDER BY n DESC, c.created_at LIMIT 25", ev["id"])
+        if rows:
+            text += "\n\n🙋 <b>المتسابقون:</b>\n" + "\n".join(
+                f"{i}. {esc(r['name'])} — {r['n']} صوت" for i, r in enumerate(rows, 1))
+    return text
+
+
+def post_markup(ev):
+    import ctx
+    from aiogram.utils.keyboard import InlineKeyboardBuilder
+    link = f"https://t.me/{ctx.bot_username}?start=ev_{ev['id']}"
+    kb = InlineKeyboardBuilder()
+    if ev["kind"] != "votes":
+        kb.button(text="🎡 شارك الآن", url=link)
+    else:
+        kb.button(text="🙋 سجّل كمتسابق", url=link)
+        kb.button(text="🗳 صوّت", url=link)
+        kb.button(text="📊 الترتيب", callback_data=f"rank:{ev['id']}")
+    kb.button(text="👑 للمنظّم: سحب الفائز", callback_data=f"chwin:{ev['id']}")
+    kb.adjust(1)
+    return kb.as_markup()
+
+
+async def refresh_post(bot, db, ev_id, force=False):
+    """يحدّث منشور القناة (أسماء المتسابقين/الأصوات) مع حدّ زمني ضد الإغراق."""
+    ev = await db.one("SELECT * FROM events WHERE id=?", ev_id)
+    if not ev or ev["status"] != "active" or not ev["channel_id"] or not ev["message_id"]:
+        return
+    if not force and time.time() - _post_last.get(ev_id, 0) < 45:
+        return
+    _post_last[ev_id] = time.time()
+    try:
+        await bot.edit_message_text(await post_text(db, ev), chat_id=ev["channel_id"],
+                                    message_id=ev["message_id"], reply_markup=post_markup(ev))
+    except Exception as e:
+        if "not modified" not in str(e):
+            log.info("refresh_post failed: %s", e)
 
 
 # ───────────── إنهاء الفعاليات والسحب ─────────────
@@ -353,12 +404,21 @@ async def has_valid_entry(bot, db, ev, uid):
     return False
 
 
-async def finish_event(bot, db, event_id):
+async def finish_event(bot, db, event_id, manual=None):
+    """manual = قائمة ايديات فائزين يحددها المنظّم (بدل السحب التلقائي)."""
     if not await db.run("UPDATE events SET status='ending' WHERE id=? AND status='active'", event_id):
         return None
     ev = await db.one("SELECT * FROM events WHERE id=?", event_id)
     winners, proof, ranking = [], None, []
-    if ev["kind"] in ("roulette", "chroulette"):
+    if manual:
+        winners = list(dict.fromkeys(manual))[:ev["winners"]]
+        proof = "manual"
+        if ev["kind"] == "votes":
+            ranking = await db.all(
+                "SELECT c.user_id, c.name, COUNT(v.voter_id) AS votes FROM candidates c "
+                "LEFT JOIN votes v ON v.candidate_id=c.id WHERE c.approved=1 AND c.event_id=? GROUP BY c.id "
+                "ORDER BY votes DESC, c.created_at", event_id)
+    elif ev["kind"] in ("roulette", "chroulette"):
         tickets = {}
         if ev["kind"] == "chroulette":
             ids = [r["user_id"] for r in await db.all("SELECT DISTINCT user_id FROM event_entries WHERE event_id=?", event_id)]
@@ -387,7 +447,7 @@ async def finish_event(bot, db, event_id):
     else:
         ranking = await db.all(
             "SELECT c.user_id, c.name, COUNT(v.voter_id) AS votes FROM candidates c "
-            "LEFT JOIN votes v ON v.candidate_id=c.id WHERE c.event_id=? GROUP BY c.id "
+            "LEFT JOIN votes v ON v.candidate_id=c.id WHERE c.approved=1 AND c.event_id=? GROUP BY c.id "
             "ORDER BY votes DESC, c.created_at", event_id)
         for r in ranking:
             if len(winners) >= ev["winners"]:
@@ -431,13 +491,15 @@ async def announce(bot, db, ev, winners, proof, ranking):
         lines += [f"{i}. {mention(w)}" for i, w in enumerate(wrows, 1)]
     else:
         lines.append("\nلا يوجد فائزون مؤهلون.")
-    if proof:
+    if proof == "manual":
+        lines.append("\n🎯 تم تحديد الفائز من قبل المنظّم.")
+    elif proof:
         n, digest, seed = proof.split(":")
         lines.append(f"\n🔍 إثبات السحب: {n} مشارك\nhash: <code>{digest}</code>\nseed: <code>{seed}</code>")
     text = "\n".join(lines)
     if ev["channel_id"]:
         names = []
-        if ev["kind"] != "votes":
+        if ev["kind"] != "votes" and proof != "manual":
             rows = await db.all("SELECT u.first_name, u.username FROM participants p JOIN users u ON u.user_id=p.user_id "
                                 "WHERE p.event_id=? ORDER BY RANDOM() LIMIT 30", ev["id"])
             names = [r["first_name"] or r["username"] or "?" for r in rows]
@@ -481,7 +543,7 @@ async def send_reminders(bot, db):
     for ev in rows:
         await db.run("UPDATE events SET reminded=1 WHERE id=?", ev["id"])
         if ev["kind"] == "votes":
-            cnt = await db.val("SELECT COUNT(*) FROM candidates WHERE event_id=?", ev["id"])
+            cnt = await db.val("SELECT COUNT(*) FROM candidates WHERE approved=1 AND event_id=?", ev["id"])
         else:
             cnt = await db.val("SELECT COUNT(*) FROM participants WHERE event_id=?", ev["id"])
         await safe_send(bot, ev["owner_id"], f"⏰ فعاليتك «{esc(ev['title'])}» تنتهي خلال أقل من ساعة. المشاركون: {cnt}")
@@ -578,6 +640,179 @@ async def notify_join(bot, db, ev, uid, extra=""):
                                          f"👤 {open_link(u)}{extra}\n👥 المشاركون: {n}")
 
 
+# ───────────── رولت القنوات: مراقبة حذف رسالة الفعالية من قنوات المشاركين ─────────────
+REPOST_DELAY = 300      # بعد كم ثانية من الحذف يعيد البوت نشر الرسالة تلقائياً
+WATCH_EVERY = 60        # كل كم ثانية يفحص البوت وجود الرسائل
+_entry_lock = asyncio.Lock()
+
+
+def promo_text(ev):
+    return esc(ev["promo_text"] or ev["title"])
+
+
+def promo_markup(ev_id):
+    from aiogram.utils.keyboard import InlineKeyboardBuilder
+    kb = InlineKeyboardBuilder()
+    kb.button(text="🎡 شارك بالروليت", url=f"https://t.me/{ctx.bot_username}?start=ev_{ev_id}")
+    return kb.as_markup()
+
+
+def return_markup(ev_id, chat_id):
+    from aiogram.utils.keyboard import InlineKeyboardBuilder
+    kb = InlineKeyboardBuilder()
+    kb.button(text="↩️ إرجاع", callback_data=f"cret:{ev_id}:{chat_id}")
+    return kb.as_markup()
+
+
+async def msg_exists(bot, chat_id, message_id, ev_id):
+    """True = الرسالة موجودة، False = محذوفة، None = لا يمكن الجزم (البوت فقد الصلاحية أو خطأ مؤقت).
+    تليجرام لا يرسل تحديثاً عند حذف رسائل القنوات، فنحاول تعديل أزرار الرسالة بنفس الأزرار:
+    «not modified» = موجودة، «not found» = محذوفة."""
+    try:
+        await bot.edit_message_reply_markup(chat_id=chat_id, message_id=message_id, reply_markup=promo_markup(ev_id))
+        return True
+    except Exception as e:
+        s = str(e).lower()
+        if "not modified" in s:
+            return True
+        if "message to edit not found" in s or "message_id_invalid" in s or "message not found" in s:
+            return False
+        return None
+
+
+async def bot_can_post(bot, chat_id):
+    try:
+        me = await bot.get_chat_member(chat_id, bot.id)
+    except Exception:
+        return False
+    if me.status == "creator":
+        return True
+    return me.status == "administrator" and getattr(me, "can_post_messages", None) is not False
+
+
+async def remove_entry(bot, db, e):
+    """تُحذف رسالة الفعالية من القناة ⇒ يُزال المشترك من الفعالية ويُبلَّغ مع زر إرجاع."""
+    async with _entry_lock:
+        def fn(c):
+            cur = c.execute("DELETE FROM event_entries WHERE event_id=? AND chat_id=? AND message_id=?",
+                            (e["event_id"], e["chat_id"], e["message_id"]))
+            if not cur.rowcount:
+                return False
+            c.execute("INSERT OR REPLACE INTO entry_removals(event_id,chat_id,user_id,title,members,removed_at,repost_msg_id) "
+                      "VALUES(?,?,?,?,?,?,NULL)",
+                      (e["event_id"], e["chat_id"], e["user_id"], e["title"], e["members"], now()))
+            if not c.execute("SELECT 1 FROM event_entries WHERE event_id=? AND user_id=?",
+                             (e["event_id"], e["user_id"])).fetchone():
+                c.execute("DELETE FROM participants WHERE event_id=? AND user_id=?", (e["event_id"], e["user_id"]))
+            return True
+        if not await db.tx(fn):
+            return False
+    ev = await db.one("SELECT title FROM events WHERE id=?", e["event_id"])
+    await audit(db, 0, "entry_removed", f"{e['event_id']}:{e['chat_id']}:{e['user_id']}")
+    await safe_send(
+        bot, e["user_id"],
+        f"⚠️ <b>حُذفت رسالة الفعالية</b> «{esc(ev['title'] if ev else '')}» من قناتك «{esc(e['title'] or '')}»، "
+        f"لذلك <b>أُزيلت مشاركتك</b> من الفعالية.\n\n"
+        f"للعودة للمسابقة أعد إرسال الرسالة بالضغط على «↩️ إرجاع».\n"
+        f"⏳ وإذا بقي البوت مشرفاً بصلاحية النشر سيعيد نشر الرسالة بالقناة تلقائياً بعد 5 دقائق "
+        f"(وتبقى بحاجة لزر «إرجاع» ليعود اسمك للمسابقة).",
+        reply_markup=return_markup(e["event_id"], e["chat_id"]))
+    return True
+
+
+async def restore_entry(bot, db, ev_id, chat_id, uid):
+    """زر «إرجاع»: يعيد نشر الرسالة (أو يستخدم المنشورة تلقائياً) ويُعيد المشترك للمسابقة. يرجع (ok, نص)."""
+    async with _entry_lock:
+        rem = await db.one("SELECT * FROM entry_removals WHERE event_id=? AND chat_id=?", ev_id, chat_id)
+        if not rem:
+            return False, "لا يوجد طلب إرجاع لهذه القناة (ربما أُرجعت بالفعل)."
+        if rem["user_id"] != uid:
+            return False, "هذا الزر لصاحب المشاركة فقط."
+        ev = await db.one("SELECT * FROM events WHERE id=?", ev_id)
+        if not ev or ev["status"] != "active" or ev["end_at"] <= now():
+            await db.run("DELETE FROM entry_removals WHERE event_id=? AND chat_id=?", ev_id, chat_id)
+            return False, "انتهت الفعالية."
+        if await db.val("SELECT 1 FROM event_entries WHERE event_id=? AND chat_id=?", ev_id, chat_id):
+            return False, "هذي القناة مسجلة مسبقاً بالفعالية."
+        if await check_user(bot, db, ev, uid):
+            return False, "لم تعد تستوفي شروط الفعالية (مثل الاشتراك الإجباري). أكملها ثم اضغط «إرجاع»."
+        try:
+            m = await bot.get_chat_member(chat_id, uid)
+            if m.status not in ("administrator", "creator"):
+                return False, "لم تعد مشرفاً بهذه القناة."
+        except Exception:
+            return False, "تعذر التحقق من إشرافك بالقناة."
+        if not await bot_can_post(bot, chat_id):
+            return False, "❌ البوت ليس مشرفاً بالقناة أو بلا صلاحية نشر الرسائل. أعطه الصلاحية ثم اضغط «إرجاع» مرة ثانية."
+        mid = rem["repost_msg_id"] or 0
+        if not (mid and await msg_exists(bot, chat_id, mid, ev_id)):
+            try:
+                mid = (await bot.send_message(chat_id, promo_text(ev), reply_markup=promo_markup(ev_id))).message_id
+            except Exception:
+                return False, "❌ تعذر النشر بقناتك. تأكد أن البوت مشرف وله صلاحية نشر الرسائل."
+
+        def fn(c):
+            if not c.execute("DELETE FROM entry_removals WHERE event_id=? AND chat_id=?", (ev_id, chat_id)).rowcount:
+                return False
+            c.execute("INSERT OR IGNORE INTO event_entries(event_id,chat_id,user_id,title,members,message_id,created_at) "
+                      "VALUES(?,?,?,?,?,?,?)", (ev_id, chat_id, uid, rem["title"], rem["members"], mid, now()))
+            c.execute("INSERT OR IGNORE INTO participants(event_id,user_id,joined_at) VALUES(?,?,?)", (ev_id, uid, now()))
+            return True
+        await db.tx(fn)
+    await audit(db, uid, "entry_restored", f"{ev_id}:{chat_id}")
+    return True, "✅ أُعيدت الرسالة بقناتك وعدت للمسابقة."
+
+
+async def repost_removed(bot, db):
+    """بعد 5 دقائق من الحذف: إعادة نشر الرسالة بالقناة تلقائياً إن بقي البوت مشرفاً بصلاحية النشر."""
+    for rem in await db.all("SELECT * FROM entry_removals WHERE repost_msg_id IS NULL AND removed_at<=?",
+                            now() - REPOST_DELAY):
+        async with _entry_lock:
+            cur = await db.one("SELECT * FROM entry_removals WHERE event_id=? AND chat_id=?", rem["event_id"], rem["chat_id"])
+            if not cur or cur["repost_msg_id"] is not None:
+                continue   # أُرجعت بالزر أو عُولجت
+            ev = await db.one("SELECT * FROM events WHERE id=?", rem["event_id"])
+            if not ev or ev["status"] != "active" or ev["end_at"] <= now():
+                await db.run("DELETE FROM entry_removals WHERE event_id=? AND chat_id=?", rem["event_id"], rem["chat_id"])
+                continue
+            mid = 0   # 0 = جرت المحاولة (فشلت أو لا صلاحية) فلا نكررها
+            if await bot_can_post(bot, rem["chat_id"]):
+                try:
+                    mid = (await bot.send_message(rem["chat_id"], promo_text(ev),
+                                                  reply_markup=promo_markup(ev["id"]))).message_id
+                except Exception as e:
+                    log.info("repost to %s failed: %s", rem["chat_id"], e)
+            await db.run("UPDATE entry_removals SET repost_msg_id=? WHERE event_id=? AND chat_id=?",
+                         mid, rem["event_id"], rem["chat_id"])
+        if mid:
+            await safe_send(bot, rem["user_id"],
+                            f"📣 أعاد البوت نشر رسالة الفعالية «{esc(ev['title'])}» بقناتك «{esc(rem['title'] or '')}».\n"
+                            f"لتعود للمسابقة اضغط «↩️ إرجاع» (ولا تحذف الرسالة مرة ثانية).",
+                            reply_markup=return_markup(rem["event_id"], rem["chat_id"]))
+        await asyncio.sleep(0.05)
+
+
+async def watch_entries(bot, db):
+    """دورة واحدة: كشف الرسائل المحذوفة ثم إعادة النشر التلقائي."""
+    rows = await db.all(
+        "SELECT en.* FROM event_entries en JOIN events ev ON ev.id=en.event_id "
+        "WHERE ev.kind='chroulette' AND ev.status='active' AND ev.end_at>? AND en.message_id IS NOT NULL", now())
+    for e in rows:
+        if await msg_exists(bot, e["chat_id"], e["message_id"], e["event_id"]) is False:
+            await remove_entry(bot, db, e)
+        await asyncio.sleep(0.05)
+    await repost_removed(bot, db)
+
+
+async def entry_watcher(bot, db):
+    while True:
+        try:
+            await watch_entries(bot, db)
+        except Exception:
+            log.exception("entry watcher error")
+        await asyncio.sleep(WATCH_EVERY)
+
+
 async def detect_bursts(bot, db):
     """رشق مشبوه: منظّم جلب عدداً كبيراً من المستخدمين خلال 10 دقائق."""
     limit = int(db.get("burst_limit"))
@@ -668,7 +903,20 @@ async def scheduler(bot, db):
     last_chan = last_thr = last_burst = 0
     while True:
         try:
-            for e in await db.all("SELECT id FROM events WHERE status='active' AND end_at<=?", now()):
+            for e in await db.all("SELECT id,owner_id,title,draw_mode,draw_notified FROM events "
+                                  "WHERE status='active' AND end_at<=?", now()):
+                if e["draw_mode"] == "manual":   # لا سحب تلقائي: ننبّه المنظّم مرة واحدة
+                    if not e["draw_notified"]:
+                        await db.run("UPDATE events SET draw_notified=1 WHERE id=?", e["id"])
+                        from aiogram.utils.keyboard import InlineKeyboardBuilder
+                        kb = InlineKeyboardBuilder()
+                        kb.button(text="🎯 اختيار الفائز بنفسي", callback_data=f"evpick:{e['id']}")
+                        kb.button(text="🎡 تدوير العجلة (تلقائي)", callback_data=f"evend:{e['id']}")
+                        kb.adjust(1)
+                        await safe_send(bot, e["owner_id"],
+                                        f"⏰ انتهى وقت «{esc(e['title'])}» (#{e['id']}).\nاختر طريقة تحديد الفائز:",
+                                        reply_markup=kb.as_markup())
+                    continue
                 await finish_event(bot, db, e["id"])
             await send_reminders(bot, db)
             await validate_referrals(db, bot)

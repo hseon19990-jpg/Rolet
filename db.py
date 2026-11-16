@@ -36,16 +36,19 @@ CREATE TABLE IF NOT EXISTS events(
  created_at INTEGER, end_at INTEGER, need_premium INTEGER DEFAULT 0, comment_chat INTEGER,
  comment_text TEXT, need_bot_url TEXT, reminded INTEGER DEFAULT 0, spike_alerted INTEGER DEFAULT 0, proof TEXT,
  invite_bonus INTEGER DEFAULT 0, featured INTEGER DEFAULT 0, notify_owner INTEGER DEFAULT 1,
- promo_text TEXT, min_members INTEGER DEFAULT 0, max_channels INTEGER DEFAULT 10, comment_url TEXT, vote_url TEXT);
+ promo_text TEXT, min_members INTEGER DEFAULT 0, max_channels INTEGER DEFAULT 10, comment_url TEXT, vote_url TEXT, draw_mode TEXT DEFAULT 'auto', draw_notified INTEGER DEFAULT 0, approve_mode INTEGER DEFAULT 0);
 CREATE TABLE IF NOT EXISTS event_entries(
  event_id INTEGER, chat_id INTEGER, user_id INTEGER, title TEXT, members INTEGER, message_id INTEGER,
  created_at INTEGER, PRIMARY KEY(event_id, chat_id));
+CREATE TABLE IF NOT EXISTS entry_removals(
+ event_id INTEGER, chat_id INTEGER, user_id INTEGER, title TEXT, members INTEGER,
+ removed_at INTEGER, repost_msg_id INTEGER, PRIMARY KEY(event_id, chat_id));
 CREATE TABLE IF NOT EXISTS event_channels(
  event_id INTEGER, chat_id INTEGER, title TEXT, username TEXT, url TEXT, PRIMARY KEY(event_id, chat_id));
 CREATE TABLE IF NOT EXISTS participants(
  event_id INTEGER, user_id INTEGER, joined_at INTEGER, PRIMARY KEY(event_id, user_id));
 CREATE TABLE IF NOT EXISTS candidates(
- id INTEGER PRIMARY KEY AUTOINCREMENT, event_id INTEGER, user_id INTEGER, name TEXT, created_at INTEGER,
+ id INTEGER PRIMARY KEY AUTOINCREMENT, event_id INTEGER, user_id INTEGER, name TEXT, created_at INTEGER, approved INTEGER DEFAULT 1,
  UNIQUE(event_id, user_id));
 CREATE TABLE IF NOT EXISTS votes(
  event_id INTEGER, voter_id INTEGER, candidate_id INTEGER, created_at INTEGER, PRIMARY KEY(event_id, voter_id));
@@ -58,6 +61,7 @@ CREATE TABLE IF NOT EXISTS vote_confirms(event_id INTEGER, user_id INTEGER, PRIM
 CREATE TABLE IF NOT EXISTS admin_overrides(event_id INTEGER, user_id INTEGER, code TEXT, PRIMARY KEY(event_id, user_id, code));
 CREATE TABLE IF NOT EXISTS event_invites(
  event_id INTEGER, user_id INTEGER, inviter_id INTEGER, PRIMARY KEY(event_id, user_id));
+CREATE TABLE IF NOT EXISTS event_managers(event_id INTEGER, user_id INTEGER, PRIMARY KEY(event_id, user_id));
 CREATE TABLE IF NOT EXISTS flags(owner_id INTEGER PRIMARY KEY, reason TEXT, created_at INTEGER);
 CREATE TABLE IF NOT EXISTS reports(
  id INTEGER PRIMARY KEY AUTOINCREMENT, reporter_id INTEGER, event_id INTEGER, reason TEXT, created_at INTEGER);
@@ -76,11 +80,16 @@ class DB:
         self.conn.execute("PRAGMA busy_timeout=5000")
         self.conn.executescript(SCHEMA)
         for col in ("invite_bonus INTEGER DEFAULT 0", "featured INTEGER DEFAULT 0", "notify_owner INTEGER DEFAULT 1",
-                    "promo_text TEXT", "min_members INTEGER DEFAULT 0", "max_channels INTEGER DEFAULT 10", "comment_url TEXT", "vote_url TEXT"):  # ترقية قواعد قديمة
+                    "promo_text TEXT", "min_members INTEGER DEFAULT 0", "max_channels INTEGER DEFAULT 10", "comment_url TEXT", "vote_url TEXT",
+                    "draw_mode TEXT DEFAULT 'auto'", "draw_notified INTEGER DEFAULT 0", "approve_mode INTEGER DEFAULT 0"):  # ترقية قواعد قديمة
             try:
                 self.conn.execute(f"ALTER TABLE events ADD COLUMN {col}")
             except sqlite3.OperationalError:
                 pass
+        try:
+            self.conn.execute("ALTER TABLE candidates ADD COLUMN approved INTEGER DEFAULT 1")
+        except sqlite3.OperationalError:
+            pass
         self.cache = dict(DEFAULTS)
         for r in self.conn.execute("SELECT key,value FROM settings"):
             self.cache[r["key"]] = r["value"]

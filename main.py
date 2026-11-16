@@ -14,7 +14,7 @@ import handlers_events
 import handlers_user
 from db import DB
 from middleware import GateMiddleware
-from services import scheduler
+from services import entry_watcher, scheduler
 
 
 async def main():
@@ -34,6 +34,7 @@ async def main():
     dp.include_router(handlers_user.router)
     dp.include_router(handlers_events.router)
     task = asyncio.create_task(scheduler(bot, ctx.db))  # noqa: F841
+    watcher = asyncio.create_task(entry_watcher(bot, ctx.db))  # noqa: F841
     await bot.delete_webhook(drop_pending_updates=False)
     logging.info("Bot @%s started, DB=%s", ctx.bot_username, config.DB_PATH)
     await dp.start_polling(bot, allowed_updates=dp.resolve_used_update_types())

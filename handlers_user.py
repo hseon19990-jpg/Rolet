@@ -5,7 +5,9 @@ from html import escape as esc
 
 from aiogram import Bot, F, Router
 from aiogram.filters import Command, CommandObject, CommandStart
+from aiogram.filters import StateFilter
 from aiogram.fsm.context import FSMContext
+from aiogram.fsm.state import State, StatesGroup
 from aiogram.types import CallbackQuery, ChatMemberUpdated, Message
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 
@@ -13,11 +15,15 @@ import ctx
 from config import OWNER_IDS
 from i18n import t
 from services import (KIND_ICON, check_spike, check_user, clear_gate, event_text, gate_missing, mention, notify_join,
-                      now, owner_links, owner_quality, record_referral, resolve_source, retention_sample, safe_send,
+                      now, owner_links, refresh_post, owner_quality, record_referral, resolve_source, retention_sample, safe_send,
                       top_channels, create_payout, ensure_default_link, audit)
 from ui import gate_screen, home_kb, menu_kb, show
 
 router = Router()
+
+
+class CandName(StatesGroup):
+    name = State()
 EMOJIS = list("🍎🚗🐶🌙⭐🔥🎈🍕⚽🎧🌹🐱🍉🚀🎲")
 _last_vote = {}
 
@@ -178,7 +184,7 @@ async def show_event(target, lang, ev_id):
     else:
         rows = await db.all(
             "SELECT c.id,c.name,COUNT(v.voter_id) AS votes FROM candidates c LEFT JOIN votes v ON v.candidate_id=c.id "
-            "WHERE c.event_id=? GROUP BY c.id ORDER BY votes DESC, c.created_at LIMIT 15", ev_id)
+            "WHERE c.approved=1 AND c.event_id=? GROUP BY c.id ORDER BY votes DESC, c.created_at LIMIT 15", ev_id)
         text += f"\n\n🙋 المتسابقون: {len(rows)}"
         if ev["status"] == "active":
             kb.button(text=t(lang, "btn_cand"), callback_data=f"cand:{ev_id}")
@@ -199,7 +205,7 @@ async def show_event(target, lang, ev_id):
 
 async def show_candidate(target, lang, ev_id, cand_id):
     c = await ctx.db.one("SELECT c.*, (SELECT COUNT(*) FROM votes v WHERE v.candidate_id=c.id) AS votes "
-                         "FROM candidates c WHERE c.id=? AND c.event_id=?", cand_id, ev_id)
+                         "FROM candidates c WHERE c.approved=1 AND c.id=? AND c.event_id=?", cand_id, ev_id)
     if not c:
         return await target.answer(t(lang, "ev_none"))
     kb = InlineKeyboardBuilder()
@@ -233,9 +239,9 @@ async def fails_screen(cb, ev, fails, retry_cb):
             if ctx.is_admin(cb.from_user.id):
                 kb.button(text="👑 اعتماد يدوي (بريميوم)", callback_data=f"aprv:{ev['id']}:premium")
         elif code == "comment":
-            lines.append(t(lang, "f_comment", text=esc(data)))
+            lines.append(t(lang, "f_comment"))
             if ev["comment_url"]:
-                kb.button(text="💬 اذهب للكروب واكتب التعليق", url=ev["comment_url"])
+                kb.button(text="💬 علق هنا", url=ev["comment_url"])
             if ctx.is_admin(cb.from_user.id):
                 kb.button(text="👑 اعتماد يدوي (تعليق)", callback_data=f"aprv:{ev['id']}:comment")
         elif code == "botconfirm":
@@ -329,7 +335,7 @@ async def conf(cb: CallbackQuery):
 
 
 @router.callback_query(F.data.startswith("cand:"))
-async def cand(cb: CallbackQuery, bot: Bot):
+async def cand(cb: CallbackQuery, bot: Bot, state: FSMContext):
     db = ctx.db
     await db.touch_user(cb.from_user)
     ev_id = int(cb.data[5:])
@@ -339,18 +345,73 @@ async def cand(cb: CallbackQuery, bot: Bot):
     fails = await check_user(bot, db, ev, cb.from_user.id)
     if fails:
         return await fails_screen(cb, ev, fails, cb.data)
-    u = cb.from_user
-    name = f"@{u.username}" if u.username else (u.first_name or str(u.id))
-    await db.run("INSERT OR IGNORE INTO candidates(event_id,user_id,name,created_at) VALUES(?,?,?,?)",
-                 ev_id, u.id, name, now())
+    if await db.one("SELECT 1 FROM candidates WHERE event_id=? AND user_id=?", ev_id, cb.from_user.id):
+        return await finish_candidate(bot, cb.message, cb.from_user, ev, lang, None, cb)
+    await state.set_state(CandName.name)
+    await state.update_data(cand_ev=ev_id)
+    kb = InlineKeyboardBuilder()
+    kb.button(text="استخدم اسم حسابي", callback_data="cname:auto")
+    await cb.message.answer("✍️ اكتب اسمك الذي سيظهر في المسابقة (حتى 40 حرفاً):", reply_markup=kb.as_markup())
+    await cb.answer()
+
+
+@router.callback_query(StateFilter(CandName.name), F.data == "cname:auto")
+async def cand_name_auto(cb: CallbackQuery, bot: Bot, state: FSMContext):
+    await _cand_name_done(bot, cb.message, cb.from_user, state, None, cb)
+
+
+@router.message(StateFilter(CandName.name), F.text, ~F.text.startswith("/"))
+async def cand_name_text(m: Message, bot: Bot, state: FSMContext):
+    await _cand_name_done(bot, m, m.from_user, state, m.text.strip()[:40], None)
+
+
+async def _cand_name_done(bot, msg, u, state, name, cb):
+    d = await state.get_data()
+    await state.clear()
+    ev, lang = await load_active_by_id(d.get("cand_ev", 0), u.id)
+    if not ev:
+        return await msg.answer("⌛ الفعالية غير متاحة.")
+    await finish_candidate(bot, msg, u, ev, lang, name, cb)
+
+
+async def load_active_by_id(ev_id, uid):
+    ev = await ctx.db.one("SELECT * FROM events WHERE id=? AND status='active' AND end_at>?", ev_id, now())
+    return ev, await lang_of(uid)
+
+
+async def finish_candidate(bot, msg, u, ev, lang, name, cb):
+    db = ctx.db
+    ev_id = ev["id"]
+    if not name:
+        name = f"@{u.username}" if u.username else (u.first_name or str(u.id))
+    need_ok = int(ev["approve_mode"] or 0)
+    await db.run("INSERT OR IGNORE INTO candidates(event_id,user_id,name,created_at,approved) VALUES(?,?,?,?,?)",
+                 ev_id, u.id, name, now(), 0 if need_ok else 1)
     cid = await db.val("SELECT id FROM candidates WHERE event_id=? AND user_id=?", ev_id, u.id)
+    if need_ok and not await db.val("SELECT approved FROM candidates WHERE id=?", cid):
+        okb = InlineKeyboardBuilder()
+        okb.button(text="✅ قبول", callback_data=f"capp:ok:{cid}")
+        okb.button(text="❌ رفض", callback_data=f"capp:no:{cid}")
+        targets = {ev["owner_id"]}
+        for r in await db.all("SELECT user_id FROM event_managers WHERE event_id=?", ev_id):
+            targets.add(r["user_id"])
+        for tid in targets:
+            try:
+                await bot.send_message(tid, f"🙋 طلب مشاركة بمسابقة «{esc(ev['title'])}»\nالاسم: {esc(name)}\nID: {u.id}",
+                                       reply_markup=okb.as_markup())
+            except Exception:
+                pass
+        await msg.answer("⏳ تم إرسال طلبك، بانتظار موافقة المنظّم.")
+        return await cb.answer() if cb else None
     link = f"https://t.me/{ctx.bot_username}?start=v_{ev_id}_{cid}"
     kb = InlineKeyboardBuilder()
     kb.button(text="📊 ترتيبي", callback_data=f"myrank:{ev_id}")
     kb.button(text="📤 شارك رابطي", url="https://t.me/share/url?url=" + quote(link))
     kb.adjust(1)
-    await cb.message.answer(t(lang, "cand_ok", link=link), reply_markup=kb.as_markup())
-    await cb.answer()
+    await msg.answer(t(lang, "cand_ok", link=link), reply_markup=kb.as_markup())
+    await refresh_post(bot, db, ev_id, force=True)
+    if cb:
+        await cb.answer()
 
 
 @router.callback_query(F.data.startswith("vote:"))
@@ -369,7 +430,7 @@ async def vote(cb: CallbackQuery, bot: Bot):
     need = int(float(db.get("vote_min_age")) * 60)
     if age < need and not ctx.is_admin(uid):   # حسابات جديدة بالبوت لا تصوّت فوراً (ضد الرشق)
         return await cb.answer(t(lang, "vote_wait", m=(need - age) // 60 + 1), show_alert=True)
-    cand_row = await db.one("SELECT * FROM candidates WHERE id=? AND event_id=?", int(c), ev["id"])
+    cand_row = await db.one("SELECT * FROM candidates WHERE approved=1 AND id=? AND event_id=?", int(c), ev["id"])
     if not cand_row:
         return await cb.answer(t(lang, "ev_none"), show_alert=True)
     if cand_row["user_id"] == uid:
@@ -383,6 +444,7 @@ async def vote(cb: CallbackQuery, bot: Bot):
         return await cb.answer(t(lang, "voted_before"), show_alert=True)
     await cb.answer(t(lang, "voted", name=cand_row["name"]), show_alert=True)
     await check_spike(bot, db, ev, cand_row["id"])
+    await refresh_post(bot, db, ev["id"])
 
 
 @router.callback_query(F.data.startswith("rank:"))
@@ -390,7 +452,7 @@ async def rank(cb: CallbackQuery):
     ev_id = int(cb.data[5:])
     rows = await ctx.db.all(
         "SELECT c.name, COUNT(v.voter_id) AS votes FROM candidates c LEFT JOIN votes v ON v.candidate_id=c.id "
-        "WHERE c.event_id=? GROUP BY c.id ORDER BY votes DESC, c.created_at LIMIT 5", ev_id)
+        "WHERE c.approved=1 AND c.event_id=? GROUP BY c.id ORDER BY votes DESC, c.created_at LIMIT 5", ev_id)
     txt = "\n".join(f"{i}. {r['name']} — {r['votes']}" for i, r in enumerate(rows, 1)) or "—"
     await cb.answer(txt[:190], show_alert=True)
 
@@ -575,11 +637,11 @@ async def on_my_chat_member(ev: ChatMemberUpdated):
 async def group_text(m: Message):
     if not m.from_user or m.from_user.is_bot:
         return
-    rows = await ctx.db.all("SELECT id, comment_text FROM events WHERE status='active' AND comment_chat=? "
-                            "AND comment_text IS NOT NULL", m.chat.id)
+    if m.sender_chat or getattr(m, "is_automatic_forward", False):
+        return
+    rows = await ctx.db.all("SELECT id FROM events WHERE status='active' AND comment_chat=?", m.chat.id)
     for r in rows:
-        if r["comment_text"].lower() in m.text.lower():
-            await ctx.db.run("INSERT OR IGNORE INTO comment_hits(event_id,user_id) VALUES(?,?)", r["id"], m.from_user.id)
+        await ctx.db.run("INSERT OR IGNORE INTO comment_hits(event_id,user_id) VALUES(?,?)", r["id"], m.from_user.id)
 
 
 # ───────────── البوابة، ملفي، النشر، الفعاليات الجارية، سجل الفائزين ─────────────
@@ -599,7 +661,7 @@ async def gate_check(cb: CallbackQuery, bot: Bot):
 async def myrank(cb: CallbackQuery):
     rows = await ctx.db.all(
         "SELECT c.user_id, COUNT(v.voter_id) AS votes FROM candidates c LEFT JOIN votes v ON v.candidate_id=c.id "
-        "WHERE c.event_id=? GROUP BY c.id ORDER BY votes DESC, c.created_at", int(cb.data[7:]))
+        "WHERE c.approved=1 AND c.event_id=? GROUP BY c.id ORDER BY votes DESC, c.created_at", int(cb.data[7:]))
     for i, r in enumerate(rows):
         if r["user_id"] == cb.from_user.id:
             txt = f"📊 ترتيبك: {i + 1} من {len(rows)}\n🗳 أصواتك: {r['votes']}"
