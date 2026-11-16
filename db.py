@@ -36,7 +36,7 @@ CREATE TABLE IF NOT EXISTS events(
  created_at INTEGER, end_at INTEGER, need_premium INTEGER DEFAULT 0, comment_chat INTEGER,
  comment_text TEXT, need_bot_url TEXT, reminded INTEGER DEFAULT 0, spike_alerted INTEGER DEFAULT 0, proof TEXT,
  invite_bonus INTEGER DEFAULT 0, featured INTEGER DEFAULT 0, notify_owner INTEGER DEFAULT 1,
- promo_text TEXT, min_members INTEGER DEFAULT 0, max_channels INTEGER DEFAULT 10, comment_url TEXT, vote_url TEXT, draw_mode TEXT DEFAULT 'auto', draw_notified INTEGER DEFAULT 0, approve_mode INTEGER DEFAULT 0);
+ promo_text TEXT, min_members INTEGER DEFAULT 0, max_channels INTEGER DEFAULT 10, comment_url TEXT, vote_url TEXT, draw_mode TEXT DEFAULT 'auto', draw_notified INTEGER DEFAULT 0, approve_mode INTEGER DEFAULT 0, vote_goal INTEGER DEFAULT 0);
 CREATE TABLE IF NOT EXISTS event_entries(
  event_id INTEGER, chat_id INTEGER, user_id INTEGER, title TEXT, members INTEGER, message_id INTEGER,
  created_at INTEGER, PRIMARY KEY(event_id, chat_id));
@@ -81,7 +81,7 @@ class DB:
         self.conn.executescript(SCHEMA)
         for col in ("invite_bonus INTEGER DEFAULT 0", "featured INTEGER DEFAULT 0", "notify_owner INTEGER DEFAULT 1",
                     "promo_text TEXT", "min_members INTEGER DEFAULT 0", "max_channels INTEGER DEFAULT 10", "comment_url TEXT", "vote_url TEXT",
-                    "draw_mode TEXT DEFAULT 'auto'", "draw_notified INTEGER DEFAULT 0", "approve_mode INTEGER DEFAULT 0"):  # ترقية قواعد قديمة
+                    "draw_mode TEXT DEFAULT 'auto'", "draw_notified INTEGER DEFAULT 0", "approve_mode INTEGER DEFAULT 0", "vote_goal INTEGER DEFAULT 0"):  # ترقية قواعد قديمة
             try:
                 self.conn.execute(f"ALTER TABLE events ADD COLUMN {col}")
             except sqlite3.OperationalError:

@@ -15,7 +15,7 @@ import ctx
 from config import OWNER_IDS
 from i18n import t
 from services import (KIND_ICON, check_spike, check_user, clear_gate, event_text, gate_missing, mention, notify_join,
-                      now, owner_links, refresh_post, schedule_refresh, owner_quality, record_referral, resolve_source, retention_sample, safe_send,
+                      now, owner_links, refresh_post, schedule_refresh, owner_quality, record_referral, finish_event, resolve_source, retention_sample, safe_send,
                       top_channels, create_payout, ensure_default_link, audit)
 from ui import gate_screen, home_kb, menu_kb, show
 
@@ -445,6 +445,10 @@ async def vote(cb: CallbackQuery, bot: Bot):
         return await cb.answer(t(lang, "voted_before"), show_alert=True)
     await cb.answer(t(lang, "voted", name=cand_row["name"]), show_alert=True)
     await check_spike(bot, db, ev, cand_row["id"])
+    if ev["vote_goal"]:   # وصل أحد المتسابقين للعدد المطلوب: تنتهي المسابقة
+        got = await db.val("SELECT COUNT(*) FROM votes WHERE candidate_id=?", cand_row["id"])
+        if got >= ev["vote_goal"]:
+            return await finish_event(bot, db, ev["id"])
     await refresh_post(bot, db, ev["id"])
 
 

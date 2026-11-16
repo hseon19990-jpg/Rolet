@@ -25,6 +25,7 @@ class New(StatesGroup):
     minm = State()
     winners = State()
     hours = State()
+    goal = State()
     channel = State()
     cond = State()
     cond_text = State()
@@ -113,11 +114,15 @@ async def advance(target, state: FSMContext):
     if "hours" not in d:
         await state.set_state(New.hours)
         kb = InlineKeyboardBuilder()
-        for h, label in ((1, "ساعة"), (6, "6 ساعات"), (24, "يوم"), (72, "3 أيام"), (168, "أسبوع")):
-            kb.button(text=label, callback_data=f"d:{h}")
         kb.button(text="♾ مفتوح (أنهيها بنفسي)", callback_data="d:0")
-        kb.adjust(3)
-        return await target.answer("⏰ مدة الفعالية؟ اضغط أو اكتب عدد الساعات:", reply_markup=kb.as_markup())
+        return await target.answer("⏰ كم ساعة تستمر الفعالية؟\nأرسل <b>رقماً</b> (عدد الساعات) أو اضغط «مفتوح»:",
+                                   reply_markup=kb.as_markup())
+    if d.get("kind") == "votes" and "goal" not in d:
+        await state.set_state(New.goal)
+        kb = InlineKeyboardBuilder()
+        kb.button(text="♾ مفتوح (بدون عدد محدد)", callback_data="g:0")
+        return await target.answer("🗳 كم عدد أصوات الفائز؟\nتنتهي المسابقة عندما يصل أحد المتسابقين لهذا العدد.\n"
+                                   "أرسل <b>رقماً</b> أو اضغط «مفتوح»:", reply_markup=kb.as_markup())
     if "draw_mode" not in d and not ctx.is_owner(state.key.user_id):
         await state.update_data(draw_mode="auto")   # غير المالك: سحب عشوائي دائماً
         d["draw_mode"] = "auto"
@@ -231,6 +236,22 @@ async def in_hours(m: Message, state: FSMContext):
     await advance(m, state)
 
 
+@router.callback_query(StateFilter(New.goal), F.data.startswith("g:"))
+async def cb_goal(cb: CallbackQuery, state: FSMContext):
+    await state.update_data(goal=0)
+    await cb.answer()
+    await advance(cb.message, state)
+
+
+@router.message(StateFilter(New.goal), F.text, NOT_CMD)
+async def in_goal(m: Message, state: FSMContext):
+    txt = m.text.strip()
+    if not txt.isdigit() or not 1 <= int(txt) <= 10_000_000:
+        return await m.answer("اكتب رقماً صحيحاً (عدد الأصوات)، أو اضغط «مفتوح».")
+    await state.update_data(goal=int(txt))
+    await advance(m, state)
+
+
 @router.callback_query(StateFilter(New.mode), F.data.startswith("ap:"))
 async def cb_approve_mode(cb: CallbackQuery, state: FSMContext):
     await state.update_data(approve=1 if cb.data == "ap:1" else 0)
@@ -284,7 +305,8 @@ async def show_conditions(target, state, edit=None):
     d = await state.get_data()
     await state.set_state(New.cond)
     lines = [f"📝 <b>{esc(d['title'])}</b>",
-             f"{KIND_LABEL[d['kind']]} • 👑 {d['winners']} • ⏰ {d['hours']} ساعة", "",
+             f"{KIND_LABEL[d['kind']]} • 👑 {d['winners']} • ⏰ " + ("مفتوح" if d['hours'] > 24 * 365 else f"{d['hours']} ساعة")
+             + (f" • 🗳 {d['goal']} صوت" if d.get("goal") else ""), "",
              "📌 <b>الشروط الإضافية</b> (الاشتراك بقنوات المالك الإجبارية يُطبَّق تلقائياً):",
              f"💎 بريميوم: {'✅' if d.get('premium') else '❌'}",
              f"💬 تعليق: {'✅ (البوت مشرف بالقناة والمجموعة)' if d.get('comment_chat') else '❌'}",
@@ -311,7 +333,7 @@ async def show_conditions(target, state, edit=None):
     await target.answer("\n".join(lines), reply_markup=kb.as_markup())
 
 
-@router.callback_query(StateFilter(New.cond), F.data.startswith("c:"))
+@router.callback_query(StateFilter(New.cond, New.cond_text), F.data.startswith("c:"))
 async def cb_cond(cb: CallbackQuery, state: FSMContext, bot: Bot):
     act = cb.data[2:]
     d = await state.get_data()
@@ -335,8 +357,6 @@ async def cb_cond(cb: CallbackQuery, state: FSMContext, bot: Bot):
         await state.update_data(ask="comment_chat")
         await state.set_state(New.cond_text)
         kb = InlineKeyboardBuilder()
-        if d.get("channel"):
-            kb.button(text="💬 نفس مجموعة نقاش قناة النشر", callback_data="cg:same")
         kb.button(text="↩️ رجوع", callback_data="cg:back")
         kb.adjust(1)
         await cb.answer()
@@ -395,7 +415,18 @@ async def resolve_group(m, bot):
         if chat.username and mid:
             post_link = f"https://t.me/{chat.username}/{mid}"
     else:
-        txt = (m.text or "").strip()
+        import re
+        txt = (m.text or m.caption or "").strip()
+        mm = re.search(r"(?:https?://)?(?:www\.)?(?:t|telegram)\.(?:me|dog)/([^\s]+)", txt, re.I) or \
+            re.search(r"tg://resolve\?domain=([\w]+)(?:&post=(\d+))?", txt, re.I)
+        if mm and "tg://" in mm.group(0).lower():
+            txt = "https://t.me/" + mm.group(1) + (("/" + mm.group(2)) if mm.group(2) else "")
+        elif mm:
+            txt = "https://t.me/" + mm.group(1).rstrip(".,;:)»")
+        else:
+            u = re.search(r"@([A-Za-z][\w]{3,})", txt)
+            i = re.search(r"(?<![\w/])-?\d{6,}(?![\w])", txt)
+            txt = ("@" + u.group(1)) if u else (i.group(0) if i else txt)
         if txt.startswith(("https://t.me/", "http://t.me/", "t.me/")):
             path = txt.split("t.me/", 1)[1].split("?")[0].strip("/")
             parts = path.split("/")
@@ -459,28 +490,6 @@ async def cg_back(cb: CallbackQuery, state: FSMContext):
     await show_conditions(cb.message, state)
 
 
-@router.callback_query(StateFilter(New.cond_text), F.data == "cg:same")
-async def cg_same(cb: CallbackQuery, state: FSMContext, bot: Bot):
-    d = await state.get_data()
-    try:
-        linked = (await bot.get_chat(d["channel"])).linked_chat_id
-        chat = await bot.get_chat(linked) if linked else None
-    except Exception:
-        chat = None
-    if not chat:
-        return await cb.answer("هذي القناة ما لها مجموعة نقاش مرتبطة. أرسل رابط كروب بدلها.", show_alert=True)
-    try:
-        me = await bot.get_chat_member(chat.id, bot.id)
-        ok = me.status == "administrator"
-    except Exception:
-        ok = False
-    if not ok:
-        return await cb.answer("❌ البوت ليس مشرفاً في مجموعة النقاش. اجعله مشرفاً فيها ثم اضغط مرة ثانية.",
-                               show_alert=True)
-    await cb.answer()
-    await set_comment_group(cb.message, state, bot, chat, await channel_url(bot, await bot.get_chat(d["channel"])))
-
-
 @router.message(StateFilter(New.cond_text), F.text | F.forward_origin)
 async def in_cond_text(m: Message, state: FSMContext, bot: Bot):
     d = await state.get_data()
@@ -530,13 +539,13 @@ async def publish(cb, state, bot):
         return await cb.message.answer("❌ البوت ليس مشرفاً في قناة النشر. اجعله مشرفاً فيها ثم انشر مرة ثانية.")
     eid = await db.insert(
         "INSERT INTO events(owner_id,kind,title,prize,winners,channel_id,created_at,end_at,need_premium,"
-        "comment_chat,comment_text,need_bot_url,invite_bonus,promo_text,min_members,max_channels,comment_url,vote_url,draw_mode,approve_mode) "
-        "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        "comment_chat,comment_text,need_bot_url,invite_bonus,promo_text,min_members,max_channels,comment_url,vote_url,draw_mode,approve_mode,vote_goal) "
+        "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
         uid, d["kind"], d["title"], d.get("prize"), d["winners"], d.get("channel"), now(),
         now() + int(d["hours"] * 3600), int(bool(d.get("premium"))), d.get("comment_chat"),
         d.get("comment_text"), d.get("bot_url"), int(d.get("invite", 0) or 0), d.get("promo"),
         int(d.get("min_members", 0)), int(ctx.db.get("chroulette_max_channels")), d.get("comment_url"), d.get("vote_url"),
-        (d.get("draw_mode") or "auto") if ctx.is_owner(uid) else "auto", int(d.get("approve", 0)))
+        (d.get("draw_mode") or "auto") if ctx.is_owner(uid) else "auto", int(d.get("approve", 0)), int(d.get("goal", 0) or 0))
     for ch in d.get("extra", []):
         await db.run("INSERT OR IGNORE INTO event_channels(event_id,chat_id,title,username,url) VALUES(?,?,?,?,?)",
                      eid, ch["chat_id"], ch["title"], ch["username"], ch["url"])

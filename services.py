@@ -300,6 +300,8 @@ async def event_text(db, ev):
         lines.append(f"🎁 الجائزة: {esc(ev['prize'])}")
     lines.append(f"👑 عدد الفائزين: {ev['winners']}")
     lines.append(f"⏰ تنتهي: {fmt_time(ev['end_at'])}")
+    if ev["kind"] == "votes" and ev["vote_goal"]:
+        lines.append(f"🗳 تنتهي المسابقة عند وصول أحد المتسابقين إلى {ev['vote_goal']} صوت")
     if ev["kind"] == "chroulette":
         lines.append("\n🌐 <b>للمشرفين وملاك القنوات فقط</b>\nيُنشر إعلان الفعالية بقناتك وتدخل السحب، وكل قناة تزيد فرصك.")
         lines.append(f"🎟 أقصى عدد قنوات: {ev['max_channels']}")
